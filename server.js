@@ -25,7 +25,7 @@ const BRU_FOOD_SHEET_ID = process.env.BRU_FOOD_SHEET_ID;
 
 const SCREEN_LOGIN_TOKEN = process.env.SCREEN_LOGIN_TOKEN;
 const AUTH_COOKIE_SECRET = process.env.AUTH_COOKIE_SECRET;
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3002;
 
 // Paths
 const AUTH_COOKIE_NAME = "hg_bru_screen_auth";
