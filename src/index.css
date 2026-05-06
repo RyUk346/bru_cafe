@@ -1,0 +1,47 @@
+@import "tailwindcss";
+
+/* In your index.css */
+.animate-slide-text {
+  display: inline-block;
+  padding-left: 0%;
+  animation: slide 8s linear infinite;
+}
+/* CSS for the animation */
+@keyframes slideInOut {
+  0% {
+    transform: translateY(-100%); /* Start above the screen */
+    opacity: 0;
+  }
+  10% {
+    transform: translateY(0); /* Move to its normal position */
+    opacity: 1;
+  }
+  90% {
+    transform: translateY(0); /* Stay at its position */
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100%); /* Move down out of the screen */
+    opacity: 0;
+  }
+}
+
+.animated-image {
+  animation: slideInOut 10s ease-in-out forwards;
+}
+@keyframes slide {
+  0% {
+    transform: translateX(0);
+  }
+  10% {
+    transform: translateX(0);
+  } /* Wait at the start */
+  90% {
+    transform: translateX(-100%);
+  } /* Slide to the end */
+  100% {
+    transform: translateX(0);
+  } /* Reset */
+}
+
+/* Optional: Pause on hover so users can read it */
