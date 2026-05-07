@@ -256,33 +256,155 @@ function getWeatherLabel(weatherCode, precipitation = 0) {
   return "Mild";
 }
 
-// Food sheet parser
-function parseFoodImageSheet(rows) {
-  if (!rows.length) return {};
+// ----------------- Food sheet parsing & rules -----------------
 
-  const headers = rows[0].map((h) => String(h || "").trim());
-  const foodMap = {};
+// Find a header column index by fuzzy match (case/space/typo tolerant)
+function findHeaderIndex(headers, candidates) {
+  const norm = (s) =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
 
-  headers.forEach((header, colIndex) => {
-    if (!header) return;
+  const normalizedHeaders = headers.map(norm);
 
-    foodMap[header] = rows
-      .slice(1)
-      .map((row) => String(row[colIndex] || "").trim())
-      .filter(Boolean);
-  });
+  for (const cand of candidates) {
+    const target = norm(cand);
+    const idx = normalizedHeaders.indexOf(target);
+    if (idx !== -1) return idx;
+  }
 
-  return foodMap;
+  // partial match fallback
+  for (const cand of candidates) {
+    const target = norm(cand);
+    const idx = normalizedHeaders.findIndex((h) => h.includes(target));
+    if (idx !== -1) return idx;
+  }
+
+  return -1;
 }
 
-async function chooseFoodItemWithAI({ weather, foodItems }) {
-  if (!foodItems.length) {
-    throw new Error("No food items available");
+function parseFoodSheet(rows) {
+  if (!rows.length) return [];
+
+  const headers = rows[0].map((h) => String(h || "").trim());
+
+  const nameIdx = findHeaderIndex(headers, ["Product Name", "Name"]);
+  const descIdx = findHeaderIndex(headers, [
+    "Product Description",
+    "Description",
+  ]);
+  const condIdx = findHeaderIndex(headers, [
+    "Recommendation Condition",
+    "Condition",
+  ]);
+  const recIdx = findHeaderIndex(headers, ["Recommended"]);
+  const textIdx = findHeaderIndex(headers, [
+    "Recommendation Text",
+    "Display Text",
+  ]);
+  const urlIdx = findHeaderIndex(headers, ["Url", "URL", "Image", "Image Url"]);
+
+  if (nameIdx === -1 || urlIdx === -1) {
+    return [];
   }
 
-  if (!openai) {
-    return foodItems[0];
+  return rows
+    .slice(1)
+    .map((row) => ({
+      productName: String(row[nameIdx] || "").trim(),
+      productDescription:
+        descIdx !== -1 ? String(row[descIdx] || "").trim() : "",
+      condition: condIdx !== -1 ? String(row[condIdx] || "").trim() : "",
+      recommendedFlag: recIdx !== -1 ? String(row[recIdx] || "").trim() : "",
+      recommendationText:
+        textIdx !== -1 ? String(row[textIdx] || "").trim() : "",
+      url: String(row[urlIdx] || "").trim(),
+    }))
+    .filter((item) => item.productName && item.url);
+}
+
+// Rule evaluator – parses simple natural language conditions and returns
+// true if the current weather matches.
+function evaluateCondition(condition, weather) {
+  if (!condition) return true; // no condition -> always recommend
+
+  const text = String(condition).toLowerCase();
+  const tempC = Number(weather.temperature_2m);
+  const precipitation = Number(weather.precipitation || 0);
+  const weatherCode = Number(weather.weather_code);
+  const isDay = Boolean(weather.is_day);
+
+  let matchAll = true;
+
+  // Temperature rules
+  // "between A and B"
+  const between = text.match(
+    /temp\w*\s+between\s+(-?\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(-?\d+(?:\.\d+)?)/,
+  );
+  if (between) {
+    const low = Number(between[1]);
+    const high = Number(between[2]);
+    matchAll = matchAll && tempC >= low && tempC <= high;
+  } else {
+    // "above/over/greater than/more than N"
+    const aboveMatch = text.match(
+      /temp\w*\s+(?:above|over|greater than|more than|>=?|higher than)\s+(-?\d+(?:\.\d+)?)/,
+    );
+    if (aboveMatch) {
+      matchAll = matchAll && tempC > Number(aboveMatch[1]);
+    }
+
+    // "below/under/less than/lower than N"
+    const belowMatch = text.match(
+      /temp\w*\s+(?:below|under|less than|lower than|<=?)\s+(-?\d+(?:\.\d+)?)/,
+    );
+    if (belowMatch) {
+      matchAll = matchAll && tempC < Number(belowMatch[1]);
+    }
+
+    // "equals N" / "is N"
+    const equalsMatch = text.match(
+      /temp\w*\s+(?:equals?|is|=)\s+(-?\d+(?:\.\d+)?)/,
+    );
+    if (equalsMatch) {
+      matchAll = matchAll && Math.round(tempC) === Number(equalsMatch[1]);
+    }
   }
+
+  // Weather state keywords (apply only if mentioned)
+  if (/\brain(?:y|ing)?\b/.test(text)) {
+    matchAll =
+      matchAll &&
+      (precipitation > 0 ||
+        [61, 63, 65, 66, 67, 80, 81, 82].includes(weatherCode));
+  }
+  if (/\bsunny\b|\bclear\b/.test(text)) {
+    matchAll = matchAll && weatherCode === 0;
+  }
+  if (/\bcloudy\b/.test(text)) {
+    matchAll = matchAll && [1, 2, 3].includes(weatherCode);
+  }
+  if (/\bsnow(?:y|ing)?\b/.test(text)) {
+    matchAll = matchAll && [71, 73, 75, 77, 85, 86].includes(weatherCode);
+  }
+  if (/\bfog(?:gy)?\b/.test(text)) {
+    matchAll = matchAll && [45, 48].includes(weatherCode);
+  }
+  if (/\bday(?:time)?\b/.test(text)) {
+    matchAll = matchAll && isDay;
+  }
+  if (/\bnight(?:time)?\b/.test(text)) {
+    matchAll = matchAll && !isDay;
+  }
+
+  return matchAll;
+}
+
+// Use AI to refine ranking among rule-matched items so the most relevant
+// foods appear first in the rotation. Falls back gracefully without AI.
+async function rankFoodItemsWithAI({ weather, items }) {
+  if (!items.length) return items;
+  if (!openai || items.length === 1) return items;
 
   const weatherLabel = getWeatherLabel(
     weather.weather_code,
@@ -293,23 +415,24 @@ async function chooseFoodItemWithAI({ weather, foodItems }) {
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.2,
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
           content: `
-You are choosing one menu item for Bru Café's public screen.
+You are ranking café menu items for a public display screen.
 
-Choose the best café menu item based on:
-- current weather
-- temperature
-- rain/precipitation
-- general café customer behaviour
+You will receive the current weather and a list of pre-filtered food items
+(already known to be appropriate for the weather based on rules).
 
-Rules:
-- Return ONLY one exact item name from the availableFoodItems list.
-- Do not explain.
-- Do not create a new item.
-- The returned text must exactly match one item from the list.
+Order them from MOST suitable to LEAST suitable for right now,
+considering weather, time of day, and typical café customer behaviour.
+
+Respond ONLY in valid JSON of the form:
+{ "order": ["Product Name 1", "Product Name 2", ...] }
+
+The "order" array MUST contain every input product name exactly once,
+spelled exactly as given.
           `,
         },
         {
@@ -322,24 +445,47 @@ Rules:
               weatherLabel,
               isDay: weather.is_day,
             },
-            availableFoodItems: foodItems,
+            items: items.map((i) => ({
+              productName: i.productName,
+              description: i.productDescription,
+            })),
           }),
         },
       ],
     });
 
-    const selected = response.choices[0].message.content.trim();
+    const raw = response.choices[0].message.content.trim();
+    const parsed = JSON.parse(raw);
+    const order = Array.isArray(parsed?.order) ? parsed.order : [];
 
-    if (foodItems.includes(selected)) {
-      return selected;
+    const byName = new Map(items.map((i) => [i.productName, i]));
+    const ordered = [];
+    for (const name of order) {
+      const item = byName.get(name);
+      if (item && !ordered.includes(item)) ordered.push(item);
+    }
+    // append any items the AI dropped
+    for (const item of items) {
+      if (!ordered.includes(item)) ordered.push(item);
     }
 
-    console.warn("AI returned invalid food item:", selected);
-    return foodItems[0];
+    return ordered;
   } catch (error) {
-    console.error("Food recommendation AI failed:", error.message);
-    return foodItems[0];
+    console.error("AI ranking failed:", error.message);
+    return items;
   }
+}
+
+function buildReasonString(item, weather) {
+  const weatherLabel = getWeatherLabel(
+    weather.weather_code,
+    weather.precipitation,
+  );
+  const tempC = Math.round(Number(weather.temperature_2m));
+  const conditionPart = item.condition
+    ? `condition "${item.condition}"`
+    : "no specific condition";
+  return `${conditionPart} matched (weather: ${weatherLabel}, ${tempC}°C)`;
 }
 
 // Login routes
@@ -417,7 +563,7 @@ app.use((req, res, next) => {
   return res.redirect(LOGIN_PATH);
 });
 
-// API: Bru recommendation
+// API: Bru recommendation - returns multiple items for rotation
 app.get("/api/recommendation", async (req, res) => {
   res.set("Cache-Control", "no-store");
 
@@ -432,49 +578,65 @@ app.get("/api/recommendation", async (req, res) => {
 
     const weather = await getCurrentWeather();
 
-    const rows = await fetchSheetRange(BRU_FOOD_SHEET_ID, "Food Images!A:Z");
+    const rows = await fetchSheetRange(
+      BRU_FOOD_SHEET_ID,
+      "Food Recommendations!A:Z",
+    );
 
     if (rows.length < 2) {
       return res.status(400).json({
-        error: "Food Images sheet is empty or missing image rows",
+        error: "Food Recommendations sheet is empty",
       });
     }
 
-    const foodMap = parseFoodImageSheet(rows);
+    const allItems = parseFoodSheet(rows);
 
-    const foodItems = Object.keys(foodMap).filter(
-      (item) => foodMap[item] && foodMap[item].length > 0,
-    );
-
-    if (!foodItems.length) {
+    if (!allItems.length) {
       return res.status(400).json({
-        error: "No food items with image URLs found",
+        error: "No food items found in sheet",
       });
     }
 
-    const selectedFood = await chooseFoodItemWithAI({
-      weather,
-      foodItems,
+    // Step 1: Manual override flag - exclude items explicitly marked off
+    const enabled = allItems.filter((item) => {
+      const flag = item.recommendedFlag.toLowerCase();
+      return (
+        flag !== "no" && flag !== "false" && flag !== "0" && flag !== "off"
+      );
     });
 
-    const images = foodMap[selectedFood] || [];
+    // Step 2: Rule-based filter against the Recommendation Condition column
+    let matched = enabled.filter((item) =>
+      evaluateCondition(item.condition, weather),
+    );
 
-    if (!images.length) {
-      return res.status(400).json({
-        error: `No images found for selected food item: ${selectedFood}`,
-      });
+    // Step 3: If nothing matched, fall back to all enabled items
+    if (!matched.length) {
+      matched = enabled;
     }
 
-    const selectedImage = images[Math.floor(Math.random() * images.length)];
+    // Step 4: AI ranks the matched items by relevance
+    const ranked = await rankFoodItemsWithAI({ weather, items: matched });
 
     const weatherLabel = getWeatherLabel(
       weather.weather_code,
       weather.precipitation,
     );
 
+    const recommendations = ranked.map((item) => ({
+      productName: item.productName,
+      productDescription: item.productDescription,
+      recommendationText:
+        item.recommendationText ||
+        item.productDescription ||
+        `Try our ${item.productName}`,
+      condition: item.condition,
+      imageUrl: item.url,
+      reason: buildReasonString(item, weather),
+    }));
+
     return res.json({
-      selectedFood,
-      selectedImage,
+      recommendations,
       weather: {
         temperatureC: weather.temperature_2m,
         precipitation: weather.precipitation,
@@ -482,11 +644,77 @@ app.get("/api/recommendation", async (req, res) => {
         weatherLabel,
         isDay: weather.is_day,
       },
-      message: `Today's Bru recommendation: ${selectedFood}`,
+      // Backward-compatible top-level fields based on the first item
+      selectedFood: recommendations[0]?.productName || "",
+      selectedImage: recommendations[0]?.imageUrl || "",
+      message: recommendations[0]
+        ? `Today's Bru recommendation: ${recommendations[0].productName}`
+        : "",
     });
   } catch (error) {
     console.error("recommendation error:", error);
     return res.status(500).json({ error: error.message });
+  }
+});
+
+// API: Log a recommendation impression (writes to Apps Script -> Recommendation Log tab)
+app.post("/api/log-recommendation", async (req, res) => {
+  try {
+    const { productName, reason } = req.body || {};
+
+    if (!productName || typeof productName !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "productName is required",
+      });
+    }
+
+    const RECOMMENDATION_LOG_SCRIPT_URL =
+      process.env.RECOMMENDATION_LOG_SCRIPT_URL;
+
+    if (!RECOMMENDATION_LOG_SCRIPT_URL) {
+      // Soft-fail so the screen keeps running even if logging is not yet wired up
+      console.warn(
+        "RECOMMENDATION_LOG_SCRIPT_URL not configured; skipping log write",
+      );
+      return res.json({ success: true, skipped: true });
+    }
+
+    const recommendationTime = new Date().toISOString();
+
+    const upstreamRes = await fetch(RECOMMENDATION_LOG_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        productName: String(productName).trim(),
+        reason: String(reason || "").trim(),
+        recommendationTime,
+      }),
+    });
+
+    const text = await upstreamRes.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = { success: upstreamRes.ok, raw: text };
+    }
+
+    if (!upstreamRes.ok || data.success === false) {
+      return res.status(500).json({
+        success: false,
+        error: data.error || "Failed to log recommendation",
+      });
+    }
+
+    return res.json({ success: true });
+  } catch (error) {
+    console.error("log-recommendation error:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message || "Logging failed",
+    });
   }
 });
 
