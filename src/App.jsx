@@ -6,11 +6,11 @@ import BruRecommendationBoard from "./component/BruRecommendation";
 
 export default function App() {
   return (
-    <BrowserRouter basename="/BruCafe">
+    <BrowserRouter basename="/bru_cafe">
       <Routes>
-        <Route path="/BruCafe/Screen" element={<BruRecommendationBoard />} />
-        <Route path="/BruCafe/Message" element={<QuoteFormPage />} />
-        <Route path="/BruCafe/Login" element={<LoginPage />} />
+        <Route path="/Screen" element={<BruRecommendationBoard />} />
+        <Route path="/Message" element={<QuoteFormPage />} />
+        <Route path="/Login" element={<LoginPage />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
     </BrowserRouter>

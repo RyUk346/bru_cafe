@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 // Ensure Vite is aware of the /BruCafe/ subdirectory
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  base: "/BruCafe/", // Ensure the frontend is aware of its base path
+  base: "/bru_cafe/", // Ensure the frontend is aware of its base path
 
   server: {
     proxy: {
