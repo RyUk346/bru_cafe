@@ -26,13 +26,20 @@ const BRU_FOOD_SHEET_ID = process.env.BRU_FOOD_SHEET_ID;
 const SCREEN_LOGIN_TOKEN = process.env.SCREEN_LOGIN_TOKEN;
 const AUTH_COOKIE_SECRET = process.env.AUTH_COOKIE_SECRET;
 const PORT = process.env.PORT || 3002;
+const URL_PREFIX = process.env.URL_PREFIX || "/bru_cafe";
 
 // Paths
 const AUTH_COOKIE_NAME = "hg_bru_screen_auth";
 
-const MAIN_PATH = "/BruCafe/Screen";
-const MESSAGE_PATH = "/BruCafe/Message";
-const LOGIN_PATH = "/BruCafe/Login";
+// EXTERNAL paths (browser-visible, used in redirects & HTML responses)
+const MAIN_PATH = `${URL_PREFIX}/Screen`;
+const MESSAGE_PATH = `${URL_PREFIX}/Message`;
+const LOGIN_PATH = `${URL_PREFIX}/Login`;
+
+// INTERNAL paths (used to match req.path — Nginx strips the prefix before forwarding)
+const ROUTE_MAIN = "/Screen";
+const ROUTE_MESSAGE = "/Message";
+const ROUTE_LOGIN = "/Login";
 
 const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
@@ -258,7 +265,6 @@ function getWeatherLabel(weatherCode, precipitation = 0) {
 
 // ----------------- Food sheet parsing & rules -----------------
 
-// Find a header column index by fuzzy match (case/space/typo tolerant)
 function findHeaderIndex(headers, candidates) {
   const norm = (s) =>
     String(s || "")
@@ -273,7 +279,6 @@ function findHeaderIndex(headers, candidates) {
     if (idx !== -1) return idx;
   }
 
-  // partial match fallback
   for (const cand of candidates) {
     const target = norm(cand);
     const idx = normalizedHeaders.findIndex((h) => h.includes(target));
@@ -323,10 +328,8 @@ function parseFoodSheet(rows) {
     .filter((item) => item.productName && item.url);
 }
 
-// Rule evaluator – parses simple natural language conditions and returns
-// true if the current weather matches.
 function evaluateCondition(condition, weather) {
-  if (!condition) return true; // no condition -> always recommend
+  if (!condition) return true;
 
   const text = String(condition).toLowerCase();
   const tempC = Number(weather.temperature_2m);
@@ -336,8 +339,6 @@ function evaluateCondition(condition, weather) {
 
   let matchAll = true;
 
-  // Temperature rules
-  // "between A and B"
   const between = text.match(
     /temp\w*\s+between\s+(-?\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(-?\d+(?:\.\d+)?)/,
   );
@@ -346,7 +347,6 @@ function evaluateCondition(condition, weather) {
     const high = Number(between[2]);
     matchAll = matchAll && tempC >= low && tempC <= high;
   } else {
-    // "above/over/greater than/more than N"
     const aboveMatch = text.match(
       /temp\w*\s+(?:above|over|greater than|more than|>=?|higher than)\s+(-?\d+(?:\.\d+)?)/,
     );
@@ -354,7 +354,6 @@ function evaluateCondition(condition, weather) {
       matchAll = matchAll && tempC > Number(aboveMatch[1]);
     }
 
-    // "below/under/less than/lower than N"
     const belowMatch = text.match(
       /temp\w*\s+(?:below|under|less than|lower than|<=?)\s+(-?\d+(?:\.\d+)?)/,
     );
@@ -362,7 +361,6 @@ function evaluateCondition(condition, weather) {
       matchAll = matchAll && tempC < Number(belowMatch[1]);
     }
 
-    // "equals N" / "is N"
     const equalsMatch = text.match(
       /temp\w*\s+(?:equals?|is|=)\s+(-?\d+(?:\.\d+)?)/,
     );
@@ -371,7 +369,6 @@ function evaluateCondition(condition, weather) {
     }
   }
 
-  // Weather state keywords (apply only if mentioned)
   if (/\brain(?:y|ing)?\b/.test(text)) {
     matchAll =
       matchAll &&
@@ -400,8 +397,6 @@ function evaluateCondition(condition, weather) {
   return matchAll;
 }
 
-// Use AI to refine ranking among rule-matched items so the most relevant
-// foods appear first in the rotation. Falls back gracefully without AI.
 async function rankFoodItemsWithAI({ weather, items }) {
   if (!items.length) return items;
   if (!openai || items.length === 1) return items;
@@ -464,7 +459,6 @@ spelled exactly as given.
       const item = byName.get(name);
       if (item && !ordered.includes(item)) ordered.push(item);
     }
-    // append any items the AI dropped
     for (const item of items) {
       if (!ordered.includes(item)) ordered.push(item);
     }
@@ -539,13 +533,13 @@ app.use((req, res, next) => {
   const requestPath = req.path;
 
   const isMainPath =
-    requestPath === MAIN_PATH || requestPath.startsWith(`${MAIN_PATH}/`);
+    requestPath === ROUTE_MAIN || requestPath.startsWith(`${ROUTE_MAIN}/`);
 
   const isPublicPath =
-    requestPath === MESSAGE_PATH ||
-    requestPath.startsWith(`${MESSAGE_PATH}/`) ||
-    requestPath === LOGIN_PATH ||
-    requestPath.startsWith(`${LOGIN_PATH}/`) ||
+    requestPath === ROUTE_MESSAGE ||
+    requestPath.startsWith(`${ROUTE_MESSAGE}/`) ||
+    requestPath === ROUTE_LOGIN ||
+    requestPath.startsWith(`${ROUTE_LOGIN}/`) ||
     requestPath === "/server-login" ||
     requestPath === "/server-logout" ||
     requestPath.startsWith("/api/");
@@ -563,7 +557,7 @@ app.use((req, res, next) => {
   return res.redirect(LOGIN_PATH);
 });
 
-// API: Bru recommendation - returns multiple items for rotation
+// API: Bru recommendation
 app.get("/api/recommendation", async (req, res) => {
   res.set("Cache-Control", "no-store");
 
@@ -597,7 +591,6 @@ app.get("/api/recommendation", async (req, res) => {
       });
     }
 
-    // Step 1: Manual override flag - exclude items explicitly marked off
     const enabled = allItems.filter((item) => {
       const flag = item.recommendedFlag.toLowerCase();
       return (
@@ -605,17 +598,14 @@ app.get("/api/recommendation", async (req, res) => {
       );
     });
 
-    // Step 2: Rule-based filter against the Recommendation Condition column
     let matched = enabled.filter((item) =>
       evaluateCondition(item.condition, weather),
     );
 
-    // Step 3: If nothing matched, fall back to all enabled items
     if (!matched.length) {
       matched = enabled;
     }
 
-    // Step 4: AI ranks the matched items by relevance
     const ranked = await rankFoodItemsWithAI({ weather, items: matched });
 
     const weatherLabel = getWeatherLabel(
@@ -644,7 +634,6 @@ app.get("/api/recommendation", async (req, res) => {
         weatherLabel,
         isDay: weather.is_day,
       },
-      // Backward-compatible top-level fields based on the first item
       selectedFood: recommendations[0]?.productName || "",
       selectedImage: recommendations[0]?.imageUrl || "",
       message: recommendations[0]
@@ -657,7 +646,7 @@ app.get("/api/recommendation", async (req, res) => {
   }
 });
 
-// API: Log a recommendation impression (writes to Apps Script -> Recommendation Log tab)
+// API: Log a recommendation impression
 app.post("/api/log-recommendation", async (req, res) => {
   try {
     const { productName, reason } = req.body || {};
@@ -673,7 +662,6 @@ app.post("/api/log-recommendation", async (req, res) => {
       process.env.RECOMMENDATION_LOG_SCRIPT_URL;
 
     if (!RECOMMENDATION_LOG_SCRIPT_URL) {
-      // Soft-fail so the screen keeps running even if logging is not yet wired up
       console.warn(
         "RECOMMENDATION_LOG_SCRIPT_URL not configured; skipping log write",
       );

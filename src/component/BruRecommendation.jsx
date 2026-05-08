@@ -3,6 +3,7 @@ import useQuotes from "../hooks/useQuotes";
 import QuotesSection from "./QuotesSection";
 import WeatherWidget from "./WeatherWidget";
 import useWeather from "../hooks/useWeather";
+import { API_BASE } from "../utils/api";
 
 const ROTATION_INTERVAL_MS = 10 * 1000; // 10s per item
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000; // refetch list every 10 min
@@ -34,7 +35,7 @@ export default function BruRecommendationBoard() {
 
     async function loadRecommendations() {
       try {
-        const res = await fetch("/api/recommendation");
+        const res = await fetch(`${API_BASE}/api/recommendation`);
 
         if (!res.ok) {
           const text = await res.text();
@@ -105,7 +106,7 @@ export default function BruRecommendationBoard() {
     if (!current) return;
 
     let cancelled = false;
-    fetch("/api/log-recommendation", {
+    fetch(`${API_BASE}/api/log-recommendation`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
