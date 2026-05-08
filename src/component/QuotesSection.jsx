@@ -77,12 +77,13 @@ export default function QuotesSection({ quotes = [] }) {
   return (
     <div className="h-full w-full rounded-3xl">
       <div className="flex h-full items-stretch gap-2">
-        <div className="flex h-full flex-1 items-center justify-center overflow-hidden rounded-lg bg-black/30 px-8 py-4 text-center backdrop-blur-md">
+        <div className="flex h-full flex-1 items-center justify-center overflow-hidden rounded-lg bg-black/10 px-8 py-4 text-center backdrop-blur-md">
           {shouldShowPrompt ? (
             <div>
-               <div className="max-[1750px]:text-lg text-2xl font-medium text-white/70">
-              Scan QR Code to Share a Motivational Message with your Pilates Community
-            </div>
+              <div className="max-[1750px]:text-lg text-2xl font-medium text-white/70">
+                Scan QR Code to Share a Motivational Message with your Pilates
+                Community
+              </div>
             </div>
           ) : (
             <div>

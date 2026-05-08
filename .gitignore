@@ -32,3 +32,6 @@ dist-ssr
 
 # Netlify
 .netlify
+
+# Server-side recommendation cache (regenerated at runtime)
+.recommendation-cache.json

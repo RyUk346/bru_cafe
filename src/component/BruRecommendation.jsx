@@ -5,8 +5,9 @@ import WeatherWidget from "./WeatherWidget";
 import useWeather from "../hooks/useWeather";
 import { API_BASE } from "../utils/api";
 
-const ROTATION_INTERVAL_MS = 10 * 1000; // 10s per item
-const REFRESH_INTERVAL_MS = 10 * 60 * 1000; // refetch list every 10 min
+const ROTATION_INTERVAL_MS = 20 * 1000; // 20s per item on screen (incl. transition)
+const REFRESH_INTERVAL_MS = 20 * 60 * 1000; // refetch list (and AI text) every 20 min
+const EXIT_ANIMATION_MS = 2500; // matches slideOut duration in index.css
 
 export default function BruRecommendationBoard() {
   const weather = useWeather();
@@ -14,6 +15,11 @@ export default function BruRecommendationBoard() {
 
   const [recommendations, setRecommendations] = useState([]);
   const [activeIndex, setActiveIndex] = useState(0);
+  // Index of the item *currently shown* on screen. Lags activeIndex by
+  // EXIT_ANIMATION_MS so the outgoing item can finish its slide-out before
+  // we swap to the new one.
+  const [displayedIndex, setDisplayedIndex] = useState(0);
+  const [isExiting, setIsExiting] = useState(false);
   const [recommendationError, setRecommendationError] = useState("");
   const [now, setNow] = useState(new Date());
 
@@ -69,6 +75,8 @@ export default function BruRecommendationBoard() {
 
         setRecommendations(list);
         setActiveIndex(0);
+        setDisplayedIndex(0);
+        setIsExiting(false);
         setRecommendationError(list.length ? "" : "No recommendations");
       } catch (error) {
         console.error("Recommendation fetch failed:", error);
@@ -100,8 +108,33 @@ export default function BruRecommendationBoard() {
     return () => clearInterval(interval);
   }, [recommendations.length]);
 
-  // Log each impression (initial show + every rotation) to the backend
-  const current = recommendations[activeIndex];
+  // Staged transition between items so the slide-in animation is actually
+  // visible: when activeIndex changes, run a slide-out on the current item
+  // for EXIT_ANIMATION_MS, then swap displayedIndex (key change → new item
+  // mounts and slides in via the default .animated-image animation).
+  useEffect(() => {
+    if (activeIndex === displayedIndex) {
+      // Active and displayed are aligned — make sure exit class is cleared
+      if (isExiting) setIsExiting(false);
+      return;
+    }
+
+    setIsExiting(true);
+
+    const swapTimer = setTimeout(() => {
+      setDisplayedIndex(activeIndex);
+      setIsExiting(false);
+    }, EXIT_ANIMATION_MS);
+
+    return () => clearTimeout(swapTimer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex, displayedIndex]);
+
+  // The item actually on screen is recommendations[displayedIndex]
+  // (which may lag activeIndex by EXIT_ANIMATION_MS during a rotation).
+  const current = recommendations[displayedIndex];
+
+  // Log each impression when the new item is actually shown to viewers
   useEffect(() => {
     if (!current) return;
 
@@ -120,7 +153,7 @@ export default function BruRecommendationBoard() {
     return () => {
       cancelled = true;
     };
-  }, [current?.productName, activeIndex]);
+  }, [current?.productName, displayedIndex]);
 
   const currentDate = now.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -141,7 +174,7 @@ export default function BruRecommendationBoard() {
     <div className="h-screen w-screen overflow-hidden p-2 text-white">
       <div className="grid h-full grid-cols-12 gap-2">
         {/* LEFT: rotating recommended food image with caption */}
-        <div className="col-span-2 flex h-[84vh] flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2">
+        <div className="col-span-2 flex h-[84vh] flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/10">
           <div className="mt-4 flex flex-1 flex-col overflow-hidden max-[1750px]:mt-3">
             {recommendationError && !current ? (
               <div className="flex h-full items-center justify-center rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-4 text-center text-red-300">
@@ -153,28 +186,33 @@ export default function BruRecommendationBoard() {
               </div>
             ) : (
               <div
-                key={`${current.productName}-${activeIndex}`}
-                className="flex flex-1 flex-col overflow-hidden rounded-lg animated-image"
+                key={`${current.productName}-${displayedIndex}`}
+                className={`flex flex-1 flex-col overflow-hidden rounded-lg animated-image${
+                  isExiting ? " exiting" : ""
+                }`}
               >
-                {/* Recommendation text shown ABOVE the image */}
-                <div className="px-2 pb-2 text-center ">
-                  <p className="text-base font-semibold leading-snug text-gray-500 max-[1750px]:text-sm">
-                    {current.recommendationText}
-                  </p>
-                </div>
+                {/* Recommendation text shown ABOVE the image — comic-book speech bubble.
+                    Text comes from the backend (AI-generated, served from cache). */}
+                {current.recommendationText ? (
+                  <div className="speech-bubble speech-bubble-enter mx-2 mb-6 text-center">
+                    <p className="text-base font-semibold leading-snug max-[1750px]:text-sm">
+                      {current.recommendationText}
+                    </p>
+                  </div>
+                ) : null}
 
                 <div className=" flex-1 overflow-hidden rounded-lg">
                   <img
                     src={current.imageUrl}
                     alt={current.productName}
-                    className="w-full object-fill"
+                    className="w-full h-full object-scale-down"
                   />
 
-                  <div className="inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent p-3 text-center">
+                  {/* <div className="inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent p-3 text-center">
                     <p className="text-xl font-black leading-tight max-[1750px]:text-base">
                       {current.productName}
                     </p>
-                  </div>
+                  </div> */}
                 </div>
 
                 {recommendations.length > 1 && (
@@ -183,7 +221,7 @@ export default function BruRecommendationBoard() {
                       <span
                         key={idx}
                         className={`h-1.5 w-1.5 rounded-full transition-colors ${
-                          idx === activeIndex ? "bg-white" : "bg-white/30"
+                          idx === displayedIndex ? "bg-white" : "bg-white/30"
                         }`}
                       />
                     ))}

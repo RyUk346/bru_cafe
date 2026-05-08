@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import path from "path";
+import fs from "fs";
+import fsp from "fs/promises";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 import cookieParser from "cookie-parser";
@@ -470,6 +472,161 @@ spelled exactly as given.
   }
 }
 
+async function generateRecommendationTextForItem({ item, context }) {
+  if (!openai) {
+    console.warn(
+      `[AI text] OPENAI_API_KEY is missing — falling back for "${item.productName}"`,
+    );
+    return "";
+  }
+
+  // Try up to 2 times — transient OpenAI hiccups (rate limits, network)
+  // shouldn't permanently degrade an item to its "Try our X" fallback.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        temperature: 0.9,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `
+You write ONE short, punchy café recommendation line for a digital screen.
+
+The line will appear inside a comic-book speech bubble next to a single
+menu item. It must feel hand-written for THIS item, not generic.
+
+Strict rules:
+- Maximum 12 words.
+- Sound like a cheeky, friendly barista talking to a customer.
+- Tie the line to the current weather and time of day where it feels natural.
+- Reference the item's flavour, texture, or vibe — not just its name.
+- No emojis, no hashtags, no quotation marks, no exclamation overload.
+- Do NOT use the product name as the entire line.
+
+Respond ONLY in valid JSON of the form:
+{ "text": "your single line here" }
+          `,
+          },
+          {
+            role: "user",
+            content: JSON.stringify({
+              context,
+              item: {
+                productName: item.productName,
+                description: item.productDescription,
+                condition: item.condition,
+              },
+            }),
+          },
+        ],
+      });
+
+      const raw = response.choices[0]?.message?.content?.trim() || "";
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch (parseErr) {
+        console.error(
+          `[AI text] JSON parse failed for "${item.productName}" (attempt ${attempt}). Raw response:`,
+          raw,
+        );
+        if (attempt < 2) continue;
+        return "";
+      }
+
+      // Be tolerant of slight prompt drift — accept text/line/recommendation
+      const text =
+        (typeof parsed?.text === "string" && parsed.text.trim()) ||
+        (typeof parsed?.line === "string" && parsed.line.trim()) ||
+        (typeof parsed?.recommendation === "string" &&
+          parsed.recommendation.trim()) ||
+        "";
+
+      if (!text) {
+        console.warn(
+          `[AI text] Empty text for "${item.productName}" (attempt ${attempt}). Parsed:`,
+          parsed,
+        );
+        if (attempt < 2) continue;
+        return "";
+      }
+
+      return text;
+    } catch (error) {
+      const status = error?.status || error?.response?.status;
+      const message = error?.message || String(error);
+      console.error(
+        `[AI text] OpenAI call failed for "${item.productName}" (attempt ${attempt}, status ${status || "n/a"}):`,
+        message,
+      );
+      if (attempt < 2) {
+        // brief backoff before retry
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+      return "";
+    }
+  }
+
+  return "";
+}
+
+function buildAiContext(weather) {
+  const weatherLabel = getWeatherLabel(
+    weather.weather_code,
+    weather.precipitation,
+  );
+  const tempC = Math.round(Number(weather.temperature_2m));
+  const partOfDay = (() => {
+    const hour = new Date().getHours();
+    if (hour < 11) return "morning";
+    if (hour < 15) return "lunchtime";
+    if (hour < 18) return "afternoon";
+    return "evening";
+  })();
+
+  return {
+    weatherLabel,
+    temperatureC: tempC,
+    precipitation: weather.precipitation,
+    isDay: weather.is_day,
+    partOfDay,
+  };
+}
+
+async function generateRecommendationTexts({ weather, items }) {
+  if (!items.length) return new Map();
+  if (!openai) {
+    console.warn(
+      "[AI text] OPENAI_API_KEY is missing — no AI bubble text will be generated",
+    );
+    return new Map();
+  }
+
+  const context = buildAiContext(weather);
+
+  // Run a separate OpenAI call per item, in parallel
+  const results = await Promise.all(
+    items.map(async (item) => {
+      const text = await generateRecommendationTextForItem({ item, context });
+      return [item.productName, text];
+    }),
+  );
+
+  const map = new Map();
+  for (const [name, text] of results) {
+    if (name && text) {
+      map.set(String(name).trim(), text);
+    }
+  }
+  console.log(
+    `[AI text] generated ${map.size}/${items.length} bubble lines (failures fall back to sheet text)`,
+  );
+  return map;
+}
+
 function buildReasonString(item, weather) {
   const weatherLabel = getWeatherLabel(
     weather.weather_code,
@@ -557,91 +714,251 @@ app.use((req, res, next) => {
   return res.redirect(LOGIN_PATH);
 });
 
-// API: Bru recommendation
+// ----------------- Recommendation cache -----------------
+//
+// The full recommendation pipeline (Google Sheets fetch + weather +
+// AI ranking + per-item AI bubble text) takes a few seconds.
+// We cache the result so the screen loads instantly and AI calls only
+// happen ~once every CACHE_TTL_MS in the background.
+
+const RECOMMENDATION_CACHE_TTL_MS = 20 * 60 * 1000; // 20 minutes
+const RECOMMENDATION_CACHE_FILE = path.join(
+  __dirname,
+  ".recommendation-cache.json",
+);
+let recommendationCache = null; // { payload, timestamp }
+let recommendationRefreshing = null; // in-flight refresh promise (dedupe)
+
+function looksLikeFallbackOnly(payload) {
+  // Detect a cache file whose recommendationText is mostly the
+  // hard-coded "Try our X" fallback — i.e. a cache written when AI failed.
+  const items = payload?.recommendations;
+  if (!Array.isArray(items) || !items.length) return false;
+  const fallbackCount = items.filter((it) => {
+    const t = String(it?.recommendationText || "").trim();
+    return t === `Try our ${it?.productName}` || !t;
+  }).length;
+  return fallbackCount / items.length >= 0.5;
+}
+
+function loadRecommendationCacheFromDisk() {
+  try {
+    if (!fs.existsSync(RECOMMENDATION_CACHE_FILE)) return;
+    const text = fs.readFileSync(RECOMMENDATION_CACHE_FILE, "utf8");
+    const parsed = JSON.parse(text);
+    if (parsed?.payload && typeof parsed.timestamp === "number") {
+      if (looksLikeFallbackOnly(parsed.payload)) {
+        console.warn(
+          "Disk cache looks like fallback-only ('Try our X') — discarding so a fresh AI build runs",
+        );
+        try {
+          fs.unlinkSync(RECOMMENDATION_CACHE_FILE);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      recommendationCache = parsed;
+      const ageSec = Math.round((Date.now() - parsed.timestamp) / 1000);
+      console.log(`Loaded recommendation cache from disk (age: ${ageSec}s)`);
+    }
+  } catch (error) {
+    console.warn("Failed to load cache from disk:", error.message);
+  }
+}
+
+async function saveRecommendationCacheToDisk() {
+  if (!recommendationCache) return;
+  try {
+    await fsp.writeFile(
+      RECOMMENDATION_CACHE_FILE,
+      JSON.stringify(recommendationCache),
+      "utf8",
+    );
+  } catch (error) {
+    console.warn("Failed to save cache to disk:", error.message);
+  }
+}
+
+async function buildRecommendationPayload() {
+  if (!GOOGLE_API_KEY) {
+    throw new Error("Missing GOOGLE_API_KEY");
+  }
+
+  if (!BRU_FOOD_SHEET_ID) {
+    throw new Error("Missing BRU_FOOD_SHEET_ID");
+  }
+
+  const weather = await getCurrentWeather();
+
+  const rows = await fetchSheetRange(
+    BRU_FOOD_SHEET_ID,
+    "Food Recommendations!A:Z",
+  );
+
+  if (rows.length < 2) {
+    throw new Error("Food Recommendations sheet is empty");
+  }
+
+  const allItems = parseFoodSheet(rows);
+
+  if (!allItems.length) {
+    throw new Error("No food items found in sheet");
+  }
+
+  const enabled = allItems.filter((item) => {
+    const flag = item.recommendedFlag.toLowerCase();
+    return flag !== "no" && flag !== "false" && flag !== "0" && flag !== "off";
+  });
+
+  let matched = enabled.filter((item) =>
+    evaluateCondition(item.condition, weather),
+  );
+
+  if (!matched.length) {
+    matched = enabled;
+  }
+
+  const ranked = await rankFoodItemsWithAI({ weather, items: matched });
+
+  const weatherLabel = getWeatherLabel(
+    weather.weather_code,
+    weather.precipitation,
+  );
+
+  const aiTexts = await generateRecommendationTexts({
+    weather,
+    items: ranked,
+  });
+
+  const recommendations = ranked.map((item) => ({
+    productName: item.productName,
+    productDescription: item.productDescription,
+    recommendationText:
+      aiTexts.get(item.productName) ||
+      item.recommendationText ||
+      item.productDescription ||
+      `Try our ${item.productName}`,
+    condition: item.condition,
+    imageUrl: item.url,
+    reason: buildReasonString(item, weather),
+  }));
+
+  return {
+    recommendations,
+    weather: {
+      temperatureC: weather.temperature_2m,
+      precipitation: weather.precipitation,
+      weatherCode: weather.weather_code,
+      weatherLabel,
+      isDay: weather.is_day,
+    },
+    selectedFood: recommendations[0]?.productName || "",
+    selectedImage: recommendations[0]?.imageUrl || "",
+    message: recommendations[0]
+      ? `Today's Bru recommendation: ${recommendations[0].productName}`
+      : "",
+  };
+}
+
+function refreshRecommendationsInBackground() {
+  if (recommendationRefreshing) return recommendationRefreshing;
+
+  recommendationRefreshing = (async () => {
+    try {
+      const payload = await buildRecommendationPayload();
+      recommendationCache = { payload, timestamp: Date.now() };
+      console.log("Recommendation cache refreshed");
+      // Persist so the next server restart can serve instantly
+      saveRecommendationCacheToDisk();
+    } catch (error) {
+      console.error("Recommendation refresh failed:", error.message);
+    } finally {
+      recommendationRefreshing = null;
+    }
+  })();
+
+  return recommendationRefreshing;
+}
+
+async function getRecommendationsFromCache() {
+  const now = Date.now();
+
+  // Fresh cache → return immediately
+  if (
+    recommendationCache &&
+    now - recommendationCache.timestamp < RECOMMENDATION_CACHE_TTL_MS
+  ) {
+    return recommendationCache.payload;
+  }
+
+  // Stale cache → return stale & refresh in background (stale-while-revalidate)
+  if (recommendationCache) {
+    refreshRecommendationsInBackground();
+    return recommendationCache.payload;
+  }
+
+  // No cache yet → block until first fetch completes
+  await refreshRecommendationsInBackground();
+
+  if (recommendationCache) {
+    return recommendationCache.payload;
+  }
+
+  throw new Error("Recommendation unavailable");
+}
+
+// Hydrate cache from disk synchronously at startup so the very first
+// request after restart is instant (using whatever was saved last run).
+// A background refresh kicks off immediately to bring it up to date.
+loadRecommendationCacheFromDisk();
+refreshRecommendationsInBackground();
+
+// Periodic refresh so cache never goes stale during normal operation
+setInterval(refreshRecommendationsInBackground, RECOMMENDATION_CACHE_TTL_MS);
+
+// API: Bru recommendation (served from cache)
 app.get("/api/recommendation", async (req, res) => {
   res.set("Cache-Control", "no-store");
 
   try {
-    if (!GOOGLE_API_KEY) {
-      return res.status(500).json({ error: "Missing GOOGLE_API_KEY" });
-    }
-
-    if (!BRU_FOOD_SHEET_ID) {
-      return res.status(500).json({ error: "Missing BRU_FOOD_SHEET_ID" });
-    }
-
-    const weather = await getCurrentWeather();
-
-    const rows = await fetchSheetRange(
-      BRU_FOOD_SHEET_ID,
-      "Food Recommendations!A:Z",
-    );
-
-    if (rows.length < 2) {
-      return res.status(400).json({
-        error: "Food Recommendations sheet is empty",
-      });
-    }
-
-    const allItems = parseFoodSheet(rows);
-
-    if (!allItems.length) {
-      return res.status(400).json({
-        error: "No food items found in sheet",
-      });
-    }
-
-    const enabled = allItems.filter((item) => {
-      const flag = item.recommendedFlag.toLowerCase();
-      return (
-        flag !== "no" && flag !== "false" && flag !== "0" && flag !== "off"
-      );
-    });
-
-    let matched = enabled.filter((item) =>
-      evaluateCondition(item.condition, weather),
-    );
-
-    if (!matched.length) {
-      matched = enabled;
-    }
-
-    const ranked = await rankFoodItemsWithAI({ weather, items: matched });
-
-    const weatherLabel = getWeatherLabel(
-      weather.weather_code,
-      weather.precipitation,
-    );
-
-    const recommendations = ranked.map((item) => ({
-      productName: item.productName,
-      productDescription: item.productDescription,
-      recommendationText:
-        item.recommendationText ||
-        item.productDescription ||
-        `Try our ${item.productName}`,
-      condition: item.condition,
-      imageUrl: item.url,
-      reason: buildReasonString(item, weather),
-    }));
-
-    return res.json({
-      recommendations,
-      weather: {
-        temperatureC: weather.temperature_2m,
-        precipitation: weather.precipitation,
-        weatherCode: weather.weather_code,
-        weatherLabel,
-        isDay: weather.is_day,
-      },
-      selectedFood: recommendations[0]?.productName || "",
-      selectedImage: recommendations[0]?.imageUrl || "",
-      message: recommendations[0]
-        ? `Today's Bru recommendation: ${recommendations[0].productName}`
-        : "",
-    });
+    const payload = await getRecommendationsFromCache();
+    return res.json(payload);
   } catch (error) {
     console.error("recommendation error:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+// API: Force a fresh recommendation rebuild (clears in-memory and disk cache).
+// Useful for debugging — e.g. when AI text is stuck on "Try our X" fallback.
+app.post("/api/refresh-recommendations", async (req, res) => {
+  try {
+    recommendationCache = null;
+    try {
+      if (fs.existsSync(RECOMMENDATION_CACHE_FILE)) {
+        fs.unlinkSync(RECOMMENDATION_CACHE_FILE);
+      }
+    } catch (err) {
+      console.warn("Could not delete cache file:", err.message);
+    }
+
+    await refreshRecommendationsInBackground();
+
+    const aiTextCount = recommendationCache?.payload?.recommendations?.filter(
+      (it) => {
+        const t = String(it?.recommendationText || "").trim();
+        return t && t !== `Try our ${it?.productName}`;
+      },
+    ).length;
+
+    return res.json({
+      success: true,
+      itemsWithAiText: aiTextCount ?? 0,
+      totalItems: recommendationCache?.payload?.recommendations?.length ?? 0,
+    });
+  } catch (error) {
+    console.error("refresh-recommendations error:", error);
     return res.status(500).json({ error: error.message });
   }
 });

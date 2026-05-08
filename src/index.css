@@ -6,28 +6,39 @@
   padding-left: 0%;
   animation: slide 8s linear infinite;
 }
-/* CSS for the animation */
-@keyframes slideInOut {
+/* Rotation transition: 2.5s slide-out for the outgoing item,
+   then 2.5s slide-in for the incoming item — 5s total per rotation
+   so the animation is clearly visible to viewers. */
+@keyframes slideIn {
   0% {
-    transform: translateY(-100%); /* Start above the screen */
+    transform: translateY(-24px);
     opacity: 0;
   }
-  10% {
-    transform: translateY(0); /* Move to its normal position */
+  100% {
+    transform: translateY(0);
     opacity: 1;
   }
-  90% {
-    transform: translateY(0); /* Stay at its position */
+}
+
+@keyframes slideOut {
+  0% {
+    transform: translateY(0);
     opacity: 1;
   }
   100% {
-    transform: translateY(100%); /* Move down out of the screen */
+    transform: translateY(24px);
     opacity: 0;
   }
 }
 
+/* Default: a new item slides in when it mounts */
 .animated-image {
-  animation: slideInOut 10s ease-in-out forwards;
+  animation: slideIn 2500ms ease-out both;
+}
+
+/* While exiting, the current (still-mounted) item slides out instead */
+.animated-image.exiting {
+  animation: slideOut 2500ms ease-in both;
 }
 @keyframes slide {
   0% {
@@ -45,3 +56,79 @@
 }
 
 /* Optional: Pause on hover so users can read it */
+
+/* Comic-book style speech bubble (amber, with asymmetric tail) */
+.speech-bubble {
+  position: relative;
+  background: #fcd34d54; /* amber-300 solid */
+  color: #1f2937; /* slate-800 for readability on amber */
+  border: 3px solid #00000068;
+  border-radius: 22px;
+  padding: 10px 14px;
+  box-shadow: 3px 3px 0 #000;
+}
+
+/* Outer (black) tail — gives the comic outline */
+.speech-bubble::before {
+  content: "";
+  position: absolute;
+  bottom: -22px;
+  right: 18%;
+  width: 0;
+  height: 0;
+  border-left: 18px solid transparent;
+  border-right: 0;
+  border-top: 22px solid #000;
+  transform: skewX(-12deg);
+}
+
+/* Inner (amber) tail — sits on top of the outer to create the outline effect */
+.speech-bubble::after {
+  content: "";
+  position: absolute;
+  bottom: -14px;
+  right: calc(18% + 4px);
+  width: 0;
+  height: 0;
+  border-left: 12px solid transparent;
+  border-right: 0;
+  border-top: 16px solid #ede0b3;
+  transform: skewX(-12deg);
+}
+
+/* Subtle bobbing animation so the bubble feels alive */
+@keyframes speechBubbleBob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+.speech-bubble {
+  animation: speechBubbleBob 4s ease-in-out infinite;
+}
+
+/* Entry animation: bubble pops in once AI text arrives */
+@keyframes speechBubblePop {
+  0% {
+    transform: scale(0.6) translateY(8px);
+    opacity: 0;
+  }
+  70% {
+    transform: scale(1.08) translateY(-2px);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1) translateY(0);
+    opacity: 1;
+  }
+}
+
+.speech-bubble-enter {
+  animation:
+    speechBubblePop 380ms cubic-bezier(0.34, 1.56, 0.64, 1) both,
+    speechBubbleBob 4s ease-in-out 380ms infinite;
+}
