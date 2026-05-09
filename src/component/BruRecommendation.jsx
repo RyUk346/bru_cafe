@@ -194,14 +194,19 @@ export default function BruRecommendationBoard() {
                 {/* Recommendation text shown ABOVE the image — comic-book speech bubble.
                     Text comes from the backend (AI-generated, served from cache). */}
                 {current.recommendationText ? (
-                  <div className="speech-bubble speech-bubble-enter mx-2 mb-6 text-center">
-                    <p className="text-base font-semibold leading-snug max-[1750px]:text-sm">
-                      {current.recommendationText}
-                    </p>
+                  <div className="speech-bubble speech-bubble-enter mx-1">
+                    <div className="speech-bubble-back">
+                      <div className="speech-bubble-tail" />
+                    </div>
+                    <div className="speech-bubble-front -left-0">
+                      <p className="text-center text-base font-semibold leading-snug max-[1750px]:text-sm">
+                        {current.recommendationText}
+                      </p>
+                    </div>
                   </div>
                 ) : null}
 
-                <div className=" flex-1 overflow-hidden rounded-lg">
+                <div className="image-enter flex-1 overflow-hidden rounded-lg">
                   <img
                     src={current.imageUrl}
                     alt={current.productName}

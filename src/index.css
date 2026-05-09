@@ -6,20 +6,10 @@
   padding-left: 0%;
   animation: slide 8s linear infinite;
 }
-/* Rotation transition: 2.5s slide-out for the outgoing item,
-   then 2.5s slide-in for the incoming item — 5s total per rotation
-   so the animation is clearly visible to viewers. */
-@keyframes slideIn {
-  0% {
-    transform: translateY(-24px);
-    opacity: 0;
-  }
-  100% {
-    transform: translateY(0);
-    opacity: 1;
-  }
-}
-
+/* Rotation transition keyframes.
+   Image and bubble each have their own staggered entrance animation
+   (see .image-enter and .speech-bubble-enter below); the wrapper only
+   handles the shared slide-out when the item is leaving. */
 @keyframes slideOut {
   0% {
     transform: translateY(0);
@@ -31,14 +21,30 @@
   }
 }
 
-/* Default: a new item slides in when it mounts */
+/* Default wrapper: no entrance animation — children animate themselves */
 .animated-image {
-  animation: slideIn 2500ms ease-out both;
+  /* intentionally empty */
 }
 
-/* While exiting, the current (still-mounted) item slides out instead */
+/* While exiting, the wrapper (and everything in it) slides out together */
 .animated-image.exiting {
   animation: slideOut 2500ms ease-in both;
+}
+
+/* Image: drops in from above first */
+@keyframes slideInFromTop {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.image-enter {
+  animation: slideInFromTop 800ms cubic-bezier(0.25, 0.9, 0.3, 1) both;
 }
 @keyframes slide {
   0% {
@@ -55,45 +61,128 @@
   } /* Reset */
 }
 
-/* Optional: Pause on hover so users can read it */
-
-/* Comic-book style speech bubble (amber, with asymmetric tail) */
+/* Layered speech bubble:
+   - Front layer: warm color, leans LEFT (skewX -5deg)
+   - Back layer: teal, leans RIGHT (skewX +5deg), offset down-right
+   - Tail: teal triangle on the back layer pointing down-left
+   - Outer drop-shadow on the wrapper hugs the whole composite shape */
 .speech-bubble {
   position: relative;
-  background: #fcd34d54; /* amber-300 solid */
-  color: #1f2937; /* slate-800 for readability on amber */
-  border: 3px solid #00000068;
-  border-radius: 22px;
-  padding: 10px 14px;
-  box-shadow: 3px 3px 0 #000;
+  /* No background — the layers below paint everything */
+  /* filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45)); */
 }
 
-/* Outer (black) tail — gives the comic outline */
-.speech-bubble::before {
+/* Back layer — leans right horizontally (skewX) AND has an angled top
+   that slopes down from left to right (skewY), so its top-LEFT is HIGHER
+   and top-RIGHT is LOWER. Mirror image of the front's tilt. */
+/* Container */
+.speech-bubble {
+  position: relative;
+  /* margin-top: 2rem; */
+}
+
+/* BACK BOX: Left side higher, Right side lower.
+   bottom: 0 keeps the back's bottom edge aligned with the front's. */
+.speech-bubble-back {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: -6px;
+  bottom: 0;
+  z-index: 1;
+}
+
+.speech-bubble-back::before {
   content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #cfac60;
+  border-radius: 14px;
+  transform: skewX(5deg);
+  /* Polygon with rounded corners — each of the 4 sharp polygon vertices
+     is replaced by a 3-point arc approximation (entry, midpoint, exit)
+     so the corners appear rounded. Radius ≈ 6px. */
+  clip-path: polygon(
+    /* Top-left corner (was 0% 0%) */ 0 6px,
+    1.5px 1.5px,
+    6px 0,
+    /* Top-right vertex (was 100% 20%) */ calc(100% - 6px) 20%,
+    calc(100% - 1.5px) calc(20% + 1.5px),
+    100% calc(20% + 6px),
+    /* Bottom-right corner (was 100% 100%) */ 100% calc(100% - 6px),
+    calc(100% - 1.5px) calc(100% - 1.5px),
+    calc(100% - 6px) 100%,
+    /* Bottom-left corner (was 0% 100%) */ 6px 100%,
+    1.5px calc(100% - 1.5px),
+    0 calc(100% - 6px)
+  );
+}
+
+/* Tail: Now safe because it's outside the clip-pathed pseudo-element */
+.speech-bubble-tail {
   position: absolute;
   bottom: -22px;
-  right: 18%;
+  left: 12px;
   width: 0;
   height: 0;
-  border-left: 18px solid transparent;
-  border-right: 0;
-  border-top: 22px solid #000;
-  transform: skewX(-12deg);
+  border-top: 25px solid #cfac60;
+  border-right: 22px solid transparent;
 }
 
-/* Inner (amber) tail — sits on top of the outer to create the outline effect */
-.speech-bubble::after {
+/* FRONT BOX: Left side lower, Right side higher.
+   No `bottom` offset so it sits at the natural baseline, matching the back. */
+.speech-bubble-front {
+  position: relative;
+  padding: 24px 14px 12px 14px; /* Extra top padding for the slope */
+  left: -8px;
+  bottom: 10px;
+  z-index: 2;
+  color: #2a3a3a;
+  transform: skewX(5deg);
+}
+
+.speech-bubble-front::before {
   content: "";
   position: absolute;
-  bottom: -14px;
-  right: calc(18% + 4px);
-  width: 0;
-  height: 0;
-  border-left: 12px solid transparent;
-  border-right: 0;
-  border-top: 16px solid #ede0b3;
-  transform: skewX(-12deg);
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #dfdbd2cc;
+  border-radius: 14px;
+  z-index: -1;
+  /* Polygon with rounded corners — each of the 4 sharp polygon vertices
+     is replaced by a 3-point arc approximation (entry, midpoint, exit)
+     so the corners appear rounded. Radius ≈ 6px. */
+  clip-path: polygon(
+    /* Top-left vertex (was 0% 20%) — on left edge, lower */ 0 calc(20% + 6px),
+    1.5px calc(20% + 1.5px),
+    6px 20%,
+    /* Top-right corner (was 100% 0%) */ calc(100% - 6px) 0,
+    calc(100% - 1.5px) 1.5px,
+    100% 6px,
+    /* Bottom-right corner (was 100% 100%) */ 100% calc(100% - 6px),
+    calc(100% - 1.5px) calc(100% - 1.5px),
+    calc(100% - 6px) 100%,
+    /* Bottom-left corner (was 0% 100%) */ 6px 100%,
+    1.5px calc(100% - 1.5px),
+    0 calc(100% - 6px)
+  );
+}
+
+/* Text stays perfectly upright */
+.speech-bubble-front p {
+  position: relative;
+  z-index: 3;
+}
+
+/* Counter-skew the text inside the front so letters stay upright */
+.speech-bubble-front > * {
+  display: block;
+  transform: skewX(-5deg);
 }
 
 /* Subtle bobbing animation so the bubble feels alive */
@@ -107,28 +196,22 @@
   }
 }
 
-.speech-bubble {
-  animation: speechBubbleBob 4s ease-in-out infinite;
-}
-
-/* Entry animation: bubble pops in once AI text arrives */
-@keyframes speechBubblePop {
+/* Bubble entrance: slides in from the left, but waits 2 seconds first
+   so the image lands in place before the bubble appears.
+   After the slide finishes, the gentle bob loop takes over. */
+@keyframes slideInFromLeft {
   0% {
-    transform: scale(0.6) translateY(8px);
+    transform: translateX(-150%);
     opacity: 0;
   }
-  70% {
-    transform: scale(1.08) translateY(-2px);
-    opacity: 1;
-  }
   100% {
-    transform: scale(1) translateY(0);
+    transform: translateX(0);
     opacity: 1;
   }
 }
 
 .speech-bubble-enter {
   animation:
-    speechBubblePop 380ms cubic-bezier(0.34, 1.56, 0.64, 1) both,
-    speechBubbleBob 4s ease-in-out 380ms infinite;
+    slideInFromLeft 700ms cubic-bezier(0.25, 0.9, 0.3, 1) 2s both,
+    speechBubbleBob 4s ease-in-out 2.7s infinite;
 }
