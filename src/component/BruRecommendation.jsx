@@ -172,9 +172,9 @@ export default function BruRecommendationBoard() {
 
   return (
     <div className="h-screen w-screen overflow-hidden p-2 text-white">
-      <div className="grid h-full grid-cols-12 gap-2">
+      <div className="grid h-full grid-cols-13 gap-2">
         {/* LEFT: rotating recommended food image with caption */}
-        <div className="col-span-2 flex h-[84vh] flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/10">
+        <div className="col-span-3 w-[239px] flex h-[84vh] flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/10">
           <div className="mt-4 flex flex-1 flex-col overflow-hidden max-[1750px]:mt-3">
             {recommendationError && !current ? (
               <div className="flex h-full items-center justify-center rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-4 text-center text-red-300">
@@ -261,7 +261,7 @@ export default function BruRecommendationBoard() {
         </div>
 
         {/* BOTTOM: quotes / QR section */}
-        <div className="col-span-12 h-35 max-[1750px]:h-15">
+        <div className="col-span-13 h-35 max-[1750px]:h-15">
           <QuotesSection quotes={quotes} />
         </div>
       </div>
