@@ -88,10 +88,19 @@ export default function QuotesSection({ quotes = [] }) {
 
   const currentQuote = hasQuotes ? quotes[index % quotes.length] : null;
 
+  // QR target. We use a build-time public URL (set via VITE_QUOTE_SUBMIT_URL
+  // in .env / .env.production) because the cafe screen often loads from a
+  // local origin — Chrome kiosk pointed at http://localhost:3002, an SSH
+  // tunnel, a private LAN IP — which a customer's phone can't reach. The
+  // env value should be the full public URL of the message form, e.g.
+  // https://your-domain.com/Message. Falls back to a window.location-based
+  // URL only if the env var isn't set (handy in local dev).
+  const configuredSubmitUrl = (import.meta.env.VITE_QUOTE_SUBMIT_URL || "").trim();
   const submitUrl =
-    typeof window !== "undefined"
+    configuredSubmitUrl ||
+    (typeof window !== "undefined"
       ? `${window.location.origin}/Message`
-      : "/Message";
+      : "/Message");
 
   const shouldShowPrompt = showQrPrompt || !currentQuote;
 
