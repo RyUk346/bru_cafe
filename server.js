@@ -211,6 +211,17 @@ async function fetchSheetRange(sheetId, range) {
   return data.values || [];
 }
 
+// Format a Date as "YYYY-MM-DD HH:MM:SS" in 24-hour Europe/London time,
+// suitable for the Recommendation Log sheet. We use the "sv-SE" locale
+// because Swedish formatting matches the ISO-ish layout we want, and
+// `hour12: false` guarantees the 24-hour clock regardless of host locale.
+function format24HourLondon(date = new Date()) {
+  return new Date(date).toLocaleString("sv-SE", {
+    timeZone: "Europe/London",
+    hour12: false,
+  });
+}
+
 // Date parser for quote 1-hour filter
 function parseSheetDate(dateStr) {
   if (!dateStr) return NaN;
@@ -806,18 +817,17 @@ async function buildRecommendationPayload() {
     throw new Error("No food items found in sheet");
   }
 
-  const enabled = allItems.filter((item) => {
-    const flag = item.recommendedFlag.toLowerCase();
-    return flag !== "no" && flag !== "false" && flag !== "0" && flag !== "off";
-  });
-
-  let matched = enabled.filter((item) =>
+  // The "Recommended" column is now OUTPUT-only — written back to the
+  // sheet by the Apps Script after this build. The decision of whether
+  // an item is recommended right now is driven entirely by its
+  // "Recommendation Condition" cell vs the current weather.
+  //
+  // Items whose condition matches → included → marked "Yes" in the sheet.
+  // Items whose condition doesn't match → excluded → marked "No".
+  // Items with a blank condition → always match (always Yes).
+  const matched = allItems.filter((item) =>
     evaluateCondition(item.condition, weather),
   );
-
-  if (!matched.length) {
-    matched = enabled;
-  }
 
   const ranked = await rankFoodItemsWithAI({ weather, items: matched });
 
@@ -861,6 +871,72 @@ async function buildRecommendationPayload() {
   };
 }
 
+// Push the new recommendation set to the Apps Script that owns the
+// Bru food sheets. The script is responsible for two writes:
+//   1. Food Recommendations sheet — reset every row's "Recommended" cell
+//      to "No", then set "Yes" for each product in `recommendations` and
+//      append the new AI text into that row's "Recommendation Text" cell.
+//   2. Recommendation Log sheet — append ONE new row per recommended item
+//      (per refresh) containing the AI-generated recommendation text +
+//      timestamp. (Replaces the previous "increment counter on same row"
+//      behaviour.)
+//
+// The Apps Script should branch on the `action` field; the legacy
+// `productName/reason/recommendationTime` per-impression shape is no
+// longer sent from the frontend.
+async function notifyRecommendationRefresh(payload) {
+  const RECOMMENDATION_LOG_SCRIPT_URL =
+    process.env.RECOMMENDATION_LOG_SCRIPT_URL;
+
+  if (!RECOMMENDATION_LOG_SCRIPT_URL) {
+    console.warn(
+      "RECOMMENDATION_LOG_SCRIPT_URL not configured; skipping sheet update",
+    );
+    return;
+  }
+
+  const recommendations = Array.isArray(payload?.recommendations)
+    ? payload.recommendations
+        .map((r) => ({
+          productName: String(r?.productName || "").trim(),
+          recommendationText: String(r?.recommendationText || "").trim(),
+          reason: String(r?.reason || "").trim(),
+        }))
+        .filter((r) => r.productName)
+    : [];
+
+  // Notify even with an empty list — the Apps Script uses every refresh
+  // as a cue to reset "Recommended" to "No" across the sheet before
+  // marking the new matches "Yes". Skipping when empty would leave stale
+  // "Yes" rows from the previous refresh.
+  try {
+    const upstreamRes = await fetch(RECOMMENDATION_LOG_SCRIPT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "refresh",
+        recommendations,
+        // 24-hour Europe/London "YYYY-MM-DD HH:MM:SS" — written verbatim
+        // into the Recommendation Log sheet's Recommendation Time column.
+        recommendationTime: format24HourLondon(),
+      }),
+    });
+
+    const text = await upstreamRes.text();
+    if (!upstreamRes.ok) {
+      console.error(
+        `[sheet update] Apps Script returned ${upstreamRes.status}: ${text.slice(0, 300)}`,
+      );
+    } else {
+      console.log(
+        `[sheet update] Notified Apps Script of ${recommendations.length} recommendations`,
+      );
+    }
+  } catch (error) {
+    console.error("[sheet update] notify failed:", error.message);
+  }
+}
+
 function refreshRecommendationsInBackground() {
   if (recommendationRefreshing) return recommendationRefreshing;
 
@@ -871,6 +947,13 @@ function refreshRecommendationsInBackground() {
       console.log("Recommendation cache refreshed");
       // Persist so the next server restart can serve instantly
       saveRecommendationCacheToDisk();
+      // Fire-and-forget: tell the Apps Script to update the Food
+      // Recommendations sheet (Recommended Yes/No + append text) and
+      // append a new row in the Recommendation Log sheet for each item.
+      // Don't await — sheet writes shouldn't block the cache update.
+      notifyRecommendationRefresh(payload).catch((err) =>
+        console.error("notifyRecommendationRefresh threw:", err),
+      );
     } catch (error) {
       console.error("Recommendation refresh failed:", error.message);
     } finally {
@@ -963,64 +1046,19 @@ app.post("/api/refresh-recommendations", async (req, res) => {
   }
 });
 
-// API: Log a recommendation impression
+// API: Log a recommendation impression  (DEPRECATED)
+//
+// Previously called on every frontend impression to bump a per-item
+// "times recommended" counter in the Recommendation Log sheet. The
+// frontend no longer calls this — sheet writes are now driven by the
+// server-side cache refresh (see notifyRecommendationRefresh()), so
+// each AI refresh appends a fresh row containing the recommendation
+// text rather than incrementing a counter.
+//
+// Kept as a no-op so any stale browser tabs still serving the previous
+// frontend bundle don't see 404s in the console.
 app.post("/api/log-recommendation", async (req, res) => {
-  try {
-    const { productName, reason } = req.body || {};
-
-    if (!productName || typeof productName !== "string") {
-      return res.status(400).json({
-        success: false,
-        error: "productName is required",
-      });
-    }
-
-    const RECOMMENDATION_LOG_SCRIPT_URL =
-      process.env.RECOMMENDATION_LOG_SCRIPT_URL;
-
-    if (!RECOMMENDATION_LOG_SCRIPT_URL) {
-      console.warn(
-        "RECOMMENDATION_LOG_SCRIPT_URL not configured; skipping log write",
-      );
-      return res.json({ success: true, skipped: true });
-    }
-
-    const recommendationTime = new Date().toISOString();
-
-    const upstreamRes = await fetch(RECOMMENDATION_LOG_SCRIPT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        productName: String(productName).trim(),
-        reason: String(reason || "").trim(),
-        recommendationTime,
-      }),
-    });
-
-    const text = await upstreamRes.text();
-
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      data = { success: upstreamRes.ok, raw: text };
-    }
-
-    if (!upstreamRes.ok || data.success === false) {
-      return res.status(500).json({
-        success: false,
-        error: data.error || "Failed to log recommendation",
-      });
-    }
-
-    return res.json({ success: true });
-  } catch (error) {
-    console.error("log-recommendation error:", error);
-    return res.status(500).json({
-      success: false,
-      error: error.message || "Logging failed",
-    });
-  }
+  return res.json({ success: true, deprecated: true });
 });
 
 // API: Quotes only

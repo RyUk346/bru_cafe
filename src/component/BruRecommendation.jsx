@@ -4,6 +4,7 @@ import QuotesSection from "./QuotesSection";
 import WeatherWidget from "./WeatherWidget";
 import useWeather from "../hooks/useWeather";
 import { API_BASE } from "../utils/api";
+import { PiGlobeXBold } from "react-icons/pi";
 
 const ROTATION_INTERVAL_MS = 20 * 1000; // 20s per item on screen (incl. transition)
 const REFRESH_INTERVAL_MS = 20 * 60 * 1000; // refetch list (and AI text) every 20 min
@@ -22,7 +23,9 @@ export default function BruRecommendationBoard() {
   const [isExiting, setIsExiting] = useState(false);
   const [recommendationError, setRecommendationError] = useState("");
   const [now, setNow] = useState(new Date());
-
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
   // Keep latest list in a ref so the rotation interval always sees fresh data
   const listRef = useRef(recommendations);
   useEffect(() => {
@@ -92,6 +95,20 @@ export default function BruRecommendationBoard() {
       clearInterval(interval);
     };
   }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // Rotate through items every ROTATION_INTERVAL_MS, looping back to start
   useEffect(() => {
@@ -134,26 +151,11 @@ export default function BruRecommendationBoard() {
   // (which may lag activeIndex by EXIT_ANIMATION_MS during a rotation).
   const current = recommendations[displayedIndex];
 
-  // Log each impression when the new item is actually shown to viewers
-  useEffect(() => {
-    if (!current) return;
-
-    let cancelled = false;
-    fetch(`${API_BASE}/api/log-recommendation`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        productName: current.productName,
-        reason: current.reason || "",
-      }),
-    }).catch((err) => {
-      if (!cancelled) console.error("Log recommendation failed:", err);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [current?.productName, displayedIndex]);
+  // Note: per-impression logging has been moved to the server side.
+  // The server now writes one new row to the Recommendation Log sheet (and
+  // updates the Food Recommendation sheet's Recommended/Recommendation Text
+  // columns) each time the AI recommendation refreshes (every
+  // REFRESH_INTERVAL_MS). See server.js → notifyRecommendationRefresh().
 
   const currentDate = now.toLocaleDateString("en-GB", {
     weekday: "long",
@@ -192,13 +194,39 @@ export default function BruRecommendationBoard() {
                 }`}
               >
                 {/* Recommendation text shown ABOVE the image — comic-book speech bubble.
-                    Text comes from the backend (AI-generated, served from cache). */}
+                    Text comes from the backend (AI-generated, served from cache).
+                    Each layer is an inline SVG. The path uses quadratic curves
+                    (Q commands) at every polygon vertex to round each corner
+                    — fill only, no stroke. The angled top edge is preserved
+                    exactly between curves. */}
                 {current.recommendationText ? (
                   <div className="speech-bubble speech-bubble-enter mx-1">
                     <div className="speech-bubble-back">
+                      <svg
+                        className="speech-bubble-shape"
+                        viewBox="0 0 100 100"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M 0,8 Q 0,0 7.84,1.57 L 92.16,18.43 Q 100,20 100,28 L 100,92 Q 100,100 92,100 L 8,100 Q 0,100 0,92 Z"
+                          fill="#cfac60"
+                        />
+                      </svg>
                       <div className="speech-bubble-tail" />
                     </div>
                     <div className="speech-bubble-front -left-0">
+                      <svg
+                        className="speech-bubble-shape"
+                        viewBox="0 0 100 100"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M 0,28 Q 0,20 7.84,18.43 L 92.16,1.57 Q 100,0 100,8 L 100,92 Q 100,100 92,100 L 8,100 Q 0,100 0,92 Z"
+                          fill="#dfdbd2cc"
+                        />
+                      </svg>
                       <p className="text-center text-base font-semibold leading-snug max-[1750px]:text-sm">
                         {current.recommendationText}
                       </p>
@@ -265,6 +293,19 @@ export default function BruRecommendationBoard() {
           <div className="flex-1" />
         </div>
 
+        {/* Subtle offline warning above the QR (right-justified).
+              Hidden via `invisible` (not display:none) so the QR stays
+              vertically anchored when online status toggles. */}
+        <div
+          className={`absolute bottom-18 right-2 flex w-full justify-end ${
+            isOnline ? "invisible" : ""
+          }`}
+          // style={{ width: qrSize }}
+          aria-hidden={isOnline ? "true" : "false"}
+          title={isOnline ? undefined : "No internet connection"}
+        >
+          <PiGlobeXBold className="text-red-500" />
+        </div>
         {/* BOTTOM: quotes / QR section */}
         <div className="col-span-13 h-35 max-[1750px]:h-15">
           <QuotesSection quotes={quotes} />

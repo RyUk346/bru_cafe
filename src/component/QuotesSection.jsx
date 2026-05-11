@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PiGlobeXBold } from "react-icons/pi";
 import QRCodeModule from "react-qr-code";
 
 const QRCodeComponent =
@@ -13,8 +14,28 @@ export default function QuotesSection({ quotes = [] }) {
   const [index, setIndex] = useState(0);
   const [showQrPrompt, setShowQrPrompt] = useState(false);
   const [qrSize, setQrSize] = useState(100);
+  const [isOnline, setIsOnline] = useState(
+    typeof navigator === "undefined" ? true : navigator.onLine,
+  );
 
   const hasQuotes = Array.isArray(quotes) && quotes.length > 0;
+
+  // Track browser online/offline state so we can show a subtle warning
+  // above the QR code when the cafe screen loses internet connectivity.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
 
   // Rotate submitted quotes
   useEffect(() => {
@@ -69,8 +90,8 @@ export default function QuotesSection({ quotes = [] }) {
 
   const submitUrl =
     typeof window !== "undefined"
-      ? `${window.location.origin}/StudioPLT/PLT-OP-LP/Message`
-      : "/StudioPLT/PLT-OP-LP/Message";
+      ? `${window.location.origin}/Message`
+      : "/Message";
 
   const shouldShowPrompt = showQrPrompt || !currentQuote;
 
@@ -81,8 +102,7 @@ export default function QuotesSection({ quotes = [] }) {
           {shouldShowPrompt ? (
             <div>
               <div className="max-[1750px]:text-lg text-2xl font-medium text-white/70">
-                Scan QR Code to Share a Motivational Message with your Pilates
-                Community
+                Scan QR Code to Spread the Good Vibes.
               </div>
             </div>
           ) : (
@@ -98,6 +118,19 @@ export default function QuotesSection({ quotes = [] }) {
         </div>
 
         <div className="flex h-full flex-col items-center justify-center rounded-2xl text-center">
+          {/* Subtle offline warning above the QR (right-justified).
+              Hidden via `invisible` (not display:none) so the QR stays
+              vertically anchored when online status toggles. */}
+          {/* <div
+            className={`mb-2 flex w-full justify-end ${
+              isOnline ? "invisible" : ""
+            }`}
+            style={{ width: qrSize }}
+            aria-hidden={isOnline ? "true" : "false"}
+            title={isOnline ? undefined : "No internet connection"}
+          >
+            <PiGlobeXBold className="text-red-500" />
+          </div> */}
           <div className="flex items-center justify-center rounded-xl">
             <QRCodeComponent value={submitUrl} size={qrSize} />
           </div>

@@ -63,69 +63,55 @@
 
 /* Layered speech bubble:
    - Front layer: warm color, leans LEFT (skewX -5deg)
-   - Back layer: teal, leans RIGHT (skewX +5deg), offset down-right
-   - Tail: teal triangle on the back layer pointing down-left
-   - Outer drop-shadow on the wrapper hugs the whole composite shape */
+   - Back layer: warm darker color, leans RIGHT (skewX +5deg), offset down-right
+   - Tail: triangle attached to the back layer pointing down-left
+   - Each layer's shape is rendered via inline SVG so the angled corners can
+     be properly rounded (stroke-linejoin: round + non-scaling-stroke). */
 .speech-bubble {
   position: relative;
-  /* No background — the layers below paint everything */
+  /* Leave room above for the front layer's upward shift (bottom: 10px)
+     so the parent's overflow-hidden doesn't clip the top of the front. */
+  margin-top: 12px;
+  /* No background — the SVG layers below paint everything */
   /* filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45)); */
 }
 
-/* Back layer — leans right horizontally (skewX) AND has an angled top
-   that slopes down from left to right (skewY), so its top-LEFT is HIGHER
-   and top-RIGHT is LOWER. Mirror image of the front's tilt. */
-/* Container */
-.speech-bubble {
-  position: relative;
-  /* margin-top: 2rem; */
-}
-
 /* BACK BOX: Left side higher, Right side lower.
-   bottom: 0 keeps the back's bottom edge aligned with the front's. */
+   bottom: 0 keeps the back's bottom edge aligned with the front's.
+   Container is NOT skewed so the tail keeps its natural orientation —
+   only the SVG shape inside is skewed (see .speech-bubble-back .speech-bubble-shape). */
 .speech-bubble-back {
   position: absolute;
+  width: 190px;
   top: 0;
-  left: 0;
+  left: 6px;
   right: -6px;
   bottom: 0;
   z-index: 1;
 }
 
-.speech-bubble-back::before {
-  content: "";
+.speech-bubble-shape {
   position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: #cfac60;
-  border-radius: 14px;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* Allow the rounded stroke to extend slightly beyond the SVG box */
+  overflow: visible;
+  display: block;
+  left: px;
+  pointer-events: none;
+}
+
+/* Skew applied to the SVG shape only — keeps the tail (sibling) unskewed. */
+.speech-bubble-back > .speech-bubble-shape {
   transform: skewX(5deg);
-  /* Polygon with rounded corners — each of the 4 sharp polygon vertices
-     is replaced by a 3-point arc approximation (entry, midpoint, exit)
-     so the corners appear rounded. Radius ≈ 6px. */
-  clip-path: polygon(
-    /* Top-left corner (was 0% 0%) */ 0 6px,
-    1.5px 1.5px,
-    6px 0,
-    /* Top-right vertex (was 100% 20%) */ calc(100% - 6px) 20%,
-    calc(100% - 1.5px) calc(20% + 1.5px),
-    100% calc(20% + 6px),
-    /* Bottom-right corner (was 100% 100%) */ 100% calc(100% - 6px),
-    calc(100% - 1.5px) calc(100% - 1.5px),
-    calc(100% - 6px) 100%,
-    /* Bottom-left corner (was 0% 100%) */ 6px 100%,
-    1.5px calc(100% - 1.5px),
-    0 calc(100% - 6px)
-  );
 }
 
 /* Tail: Now safe because it's outside the clip-pathed pseudo-element */
 .speech-bubble-tail {
   position: absolute;
   bottom: -22px;
-  left: 12px;
+  left: 28px;
   width: 0;
   height: 0;
   border-top: 25px solid #cfac60;
@@ -133,72 +119,35 @@
 }
 
 /* FRONT BOX: Left side lower, Right side higher.
-   No `bottom` offset so it sits at the natural baseline, matching the back. */
+   Rendered as an inline SVG (see .speech-bubble-shape) for proper rounded
+   corners while preserving the angled top edge. */
 .speech-bubble-front {
   position: relative;
   padding: 24px 14px 12px 14px; /* Extra top padding for the slope */
-  left: -8px;
+  left: -10px;
+  width: 195px;
   bottom: 10px;
+  border-radius: 16px;
   z-index: 2;
   color: #2a3a3a;
+  text-align: center;
   transform: skewX(5deg);
 }
 
-.speech-bubble-front::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: #dfdbd2cc;
-  border-radius: 14px;
-  z-index: -1;
-  /* Polygon with rounded corners — each of the 4 sharp polygon vertices
-     is replaced by a 3-point arc approximation (entry, midpoint, exit)
-     so the corners appear rounded. Radius ≈ 6px. */
-  clip-path: polygon(
-    /* Top-left vertex (was 0% 20%) — on left edge, lower */ 0 calc(20% + 6px),
-    1.5px calc(20% + 1.5px),
-    6px 20%,
-    /* Top-right corner (was 100% 0%) */ calc(100% - 6px) 0,
-    calc(100% - 1.5px) 1.5px,
-    100% 6px,
-    /* Bottom-right corner (was 100% 100%) */ 100% calc(100% - 6px),
-    calc(100% - 1.5px) calc(100% - 1.5px),
-    calc(100% - 6px) 100%,
-    /* Bottom-left corner (was 0% 100%) */ 6px 100%,
-    1.5px calc(100% - 1.5px),
-    0 calc(100% - 6px)
-  );
-}
-
-/* Text stays perfectly upright */
-.speech-bubble-front p {
+/* Text stays perfectly upright (counter-skew). Only the <p>, not the SVG. */
+.speech-bubble-front > p {
   position: relative;
   z-index: 3;
-}
-
-/* Counter-skew the text inside the front so letters stay upright */
-.speech-bubble-front > * {
+  left: 8px;
+  text-align: center;
   display: block;
   transform: skewX(-5deg);
 }
 
-/* Subtle bobbing animation so the bubble feels alive */
-@keyframes speechBubbleBob {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-3px);
-  }
-}
-
 /* Bubble entrance: slides in from the left, but waits 2 seconds first
    so the image lands in place before the bubble appears.
-   After the slide finishes, the gentle bob loop takes over. */
+   The text stays perfectly still once the slide-in completes
+   (no continuous bobbing — sub-pixel movement looked janky on the cafe screen). */
 @keyframes slideInFromLeft {
   0% {
     transform: translateX(-150%);
@@ -211,7 +160,5 @@
 }
 
 .speech-bubble-enter {
-  animation:
-    slideInFromLeft 700ms cubic-bezier(0.25, 0.9, 0.3, 1) 2s both,
-    speechBubbleBob 4s ease-in-out 2.7s infinite;
+  animation: slideInFromLeft 700ms cubic-bezier(0.25, 0.9, 0.3, 1) 2s both;
 }

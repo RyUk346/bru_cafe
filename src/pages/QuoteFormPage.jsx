@@ -1,5 +1,5 @@
 import { useState } from "react";
-import studioPlt from "../assets/Studio-PLT-Logo-grey.svg";
+import BruLogo from "../assets/Logo.png";
 import HGlogo from "../assets/hyperglow-logo.png.webp";
 import { API_BASE } from "../utils/api";
 import { isMessageSafe } from "../utils/messageFilter";
@@ -25,8 +25,7 @@ export default function QuoteFormPage() {
   const previewName = displayName.trim() || "Your Name";
   const previewQuote = quote.trim() || "Your message preview will appear here";
 
-  const isValidEmail = (value = "") =>
-    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  const isValidEmail = (value = "") => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -37,7 +36,9 @@ export default function QuoteFormPage() {
 
     if (!publicDisplayConsent) {
       setIsError(true);
-      setMessage("Please confirm that your message may be reviewed, moderated, and displayed publicly.");
+      setMessage(
+        "Please confirm that your message may be reviewed, moderated, and displayed publicly.",
+      );
       return;
     }
 
@@ -101,13 +102,12 @@ export default function QuoteFormPage() {
     }
   };
 
-  const submitDisabled =
-    submitting || !quote.trim() || !publicDisplayConsent;
+  const submitDisabled = submitting || !quote.trim() || !publicDisplayConsent;
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-gray-200 px-4 py-2 text-black">
       <div className="mb-4 flex items-center justify-between gap-4">
-        <img src={studioPlt} alt="Studio PLT" className="w-20" />
+        <img src={BruLogo} alt="Studio PLT" className="w-40" />
       </div>
 
       <div className="w-full max-w-xl space-y-2">
@@ -115,9 +115,7 @@ export default function QuoteFormPage() {
           onSubmit={handleSubmit}
           className="w-full rounded-3xl border border-black/10 bg-gray-300 p-4"
         >
-          <h1 className="text-center text-2xl font-bold">
-            Share a Message
-          </h1>
+          <h1 className="text-center text-2xl font-bold">Share a Message</h1>
 
           <div className="mt-6 space-y-4">
             <input
@@ -167,8 +165,8 @@ export default function QuoteFormPage() {
                     isAtLimit
                       ? "text-red-500"
                       : isNearLimit
-                      ? "text-yellow-500"
-                      : "text-black/60"
+                        ? "text-yellow-500"
+                        : "text-black/60"
                   }`}
                 >
                   {quote.length}/{QUOTE_MAX_LENGTH}
@@ -204,8 +202,13 @@ export default function QuoteFormPage() {
             <div className="rounded-xl border border-black/10 bg-white/60 p-3 text-xs leading-relaxed text-black/70">
               We store your name, email, and message to provide this service.
               Data may be used for moderation, display, analytics, and, with
-              consent, marketing and system improvement. See our <a className="text-blue-600" href="https://hyperglow.co.uk/privacy-policy/">Privacy Policy.</a>
-
+              consent, marketing and system improvement. See our{" "}
+              <a
+                className="text-blue-600"
+                href="https://hyperglow.co.uk/privacy-policy/"
+              >
+                Privacy Policy.
+              </a>
               <label className="mt-3 flex items-start gap-2">
                 <input
                   type="checkbox"
@@ -222,7 +225,6 @@ export default function QuoteFormPage() {
                   displayed publicly.
                 </span>
               </label>
-
               <label className="mt-2 flex items-start gap-2">
                 <input
                   type="checkbox"
