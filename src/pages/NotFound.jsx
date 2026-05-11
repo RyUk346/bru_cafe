@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-const BASE_PATH = "/BruCafe/Screen";
+const BASE_PATH = "/bru_cafe/Screen";
 const REDIRECT_SECONDS = 5;
 
 export default function NotFound() {

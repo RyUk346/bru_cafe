@@ -680,9 +680,8 @@ app.get("/server-login", (req, res) => {
         <head>
           <meta http-equiv="refresh" content="1;url=${MAIN_PATH}" />
         </head>
-        <body style="font-family: Arial; background:#111; color:#fff;">
-          <h2>Device authorized</h2>
-          <p>Logging in to Bru Café screen...</p>
+        <body style="">
+        
         </body>
       </html>
     `);
