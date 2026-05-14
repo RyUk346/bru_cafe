@@ -1,5 +1,10 @@
 // utils/moderation.js
 
+// Per-character normalization: lowercase + collapse common leetspeak.
+// Note: unlike the old version, we DO NOT strip non-alphanumeric chars
+// here — they're needed as token separators so short banned words like
+// "bs" or "mf" can be matched as whole words rather than substrings of
+// innocent words ("absolute", "comfort", "audience", etc.).
 function normalizeText(text = "") {
   return String(text)
     .toLowerCase()
@@ -8,13 +13,33 @@ function normalizeText(text = "") {
     .replace(/[$5]/g, "s")
     .replace(/[0]/g, "o")
     .replace(/[3]/g, "e")
-    .replace(/[7]/g, "t")
-    .replace(/[^a-z0-9]/g, "");
+    .replace(/[7]/g, "t");
 }
 
 function collapseRepeats(text = "") {
   return text.replace(/(.)\1+/g, "$1");
 }
+
+// Split the message into alphanumeric tokens (treating any non-alphanumeric
+// character — spaces, punctuation, emoji — as a word separator), then
+// collapse repeats per-token. Returns the list of tokens plus a single
+// "glued" string of all tokens joined, which the old substring matcher
+// still uses for disguised profanity like "f.u.c.k" → "fuck".
+function tokenize(rawText = "") {
+  const normalized = normalizeText(rawText);
+  const tokens = normalized
+    .split(/[^a-z0-9]+/)
+    .map((t) => collapseRepeats(t))
+    .filter(Boolean);
+  const glued = collapseRepeats(tokens.join(""));
+  return { tokens, glued };
+}
+
+// Banned words shorter than this length are matched as whole tokens only,
+// to avoid false positives from substrings ("bs" inside "absolute",
+// "mf" inside "comfort", "die" inside "audience"). Longer banned words
+// stay substring-matchable so disguised profanity is still caught.
+const WHOLE_WORD_THRESHOLD = 5;
 
 const bannedWords = [
   // Core profanity
@@ -132,14 +157,31 @@ const bannedPatterns = [
 ];
 
 export function findPolicyViolations(text = "") {
-  const normalized = collapseRepeats(normalizeText(text));
+  const { tokens, glued } = tokenize(text);
 
-  const wordMatches = bannedWords.filter((word) =>
-    normalized.includes(collapseRepeats(normalizeText(word))),
-  );
+  const wordMatches = bannedWords.filter((word) => {
+    const target = collapseRepeats(normalizeText(word).replace(/[^a-z0-9]/g, ""));
+    if (!target) return false;
 
+    if (target.length < WHOLE_WORD_THRESHOLD) {
+      // Short abbreviations ("bs", "mf", "die", "git", "kys", "wtf", ...)
+      // must match as a whole token, otherwise we'd ban innocent words
+      // that happen to contain those letters.
+      return tokens.includes(target);
+    }
+
+    // Longer banned words still match as substrings so disguised
+    // profanity (spaced/punctuated like "f.u.c.k") is caught after the
+    // tokens are glued back together.
+    return glued.includes(target);
+  });
+
+  // Patterns are regexes — they keep their original substring behaviour
+  // because they were authored with intentional flexibility (e.g.
+  // /f+u*c+k+/ catches "fck", "fuuuck"). They still run against the
+  // glued token string.
   const patternMatches = bannedPatterns
-    .filter((pattern) => pattern.test(normalized))
+    .filter((pattern) => pattern.test(glued))
     .map((pattern) => pattern.toString());
 
   return [...new Set([...wordMatches, ...patternMatches])];

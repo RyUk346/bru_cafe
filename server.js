@@ -60,23 +60,50 @@ const bannedWords = [
   "whore",
 ];
 
+// Per-character normalization only — does NOT strip non-alphanumeric
+// characters. We need spaces/punctuation preserved as token separators
+// so short banned words ("bs", "mf", ...) can be matched as whole
+// tokens rather than as substrings of innocent words like "absolute"
+// or "comfort".
 function normalizeText(text = "") {
   return String(text)
     .toLowerCase()
     .replace(/[@4]/g, "a")
     .replace(/[!1|]/g, "i")
     .replace(/[$5]/g, "s")
-    .replace(/[0]/g, "o")
-    .replace(/[^a-z0-9]/g, "");
+    .replace(/[0]/g, "o");
 }
 
 function collapseRepeats(text = "") {
   return text.replace(/(.)\1+/g, "$1");
 }
 
+const WHOLE_WORD_THRESHOLD = 5;
+
+function tokenizeMessage(text = "") {
+  const normalized = normalizeText(text);
+  const tokens = normalized
+    .split(/[^a-z0-9]+/)
+    .map((t) => collapseRepeats(t))
+    .filter(Boolean);
+  const glued = collapseRepeats(tokens.join(""));
+  return { tokens, glued };
+}
+
 function isMessageSafe(text = "") {
-  const cleanText = collapseRepeats(normalizeText(text));
-  return !bannedWords.some((word) => cleanText.includes(word));
+  const { tokens, glued } = tokenizeMessage(text);
+  return !bannedWords.some((word) => {
+    const target = collapseRepeats(
+      normalizeText(word).replace(/[^a-z0-9]/g, ""),
+    );
+    if (!target) return false;
+    // Short banned words must match a whole token; long ones still
+    // match as substrings to catch disguised profanity.
+    if (target.length < WHOLE_WORD_THRESHOLD) {
+      return tokens.includes(target);
+    }
+    return glued.includes(target);
+  });
 }
 
 // OpenAI moderation
@@ -532,16 +559,16 @@ Step 2 — SCORE each qualifying item on a 0-10 scale:
  c) Seasonal alignment: in-season = +1.
  d) Day-part typicality: the product is being shown in its primary day-part (breakfast item in the morning, dessert in the evening, etc.) = +1.
 
-Step 3 — SELECT exactly 2 or 3 items, applying these tie-breakers in order:
+Step 3 — SELECT exactly 3 or 4 items, applying these tie-breakers in order:
  1. Highest score wins.
  2. Category diversity: when top scores are within 1 point of each other, mix product_types (one drink, one food, one dessert) before duplicating a category.
  3. Prefer signature/POPULAR items when scores tie: Spanish Rose Latte, Pistachio Latte, Strawbella shakes, Korean Tenders, Hot Dubai Chocolate Brownie, San Sebastian Cheesecake.
  4. Sort the final array by score descending (rank 1 = highest).
 
 EDGE CASES:
-- If 0 items qualify after Step 1, relax the rules slightly: pick the 2 items whose conditions are closest to the current state (smallest distance from temperature band, sky, or time window).
+- If 0 items qualify after Step 1, relax the rules slightly: pick the 3 items whose conditions are closest to the current state (smallest distance from temperature band, sky, or time window).
 - If exactly 1 item qualifies, return that item plus the next-closest near-miss.
-- If 4+ items would otherwise tie at the top, prefer category diversity, then signature items.
+- If 5+ items would otherwise tie at the top, prefer category diversity, then signature items.
 
 OUTPUT — return strict JSON only. No markdown fences, no preamble, no commentary.
 {
@@ -560,7 +587,7 @@ OUTPUT — return strict JSON only. No markdown fences, no preamble, no commenta
 }
 
 RULES:
-- selected array length MUST be 2 or 3.
+- selected array length MUST be 3 or 4.
 - Never invent products not in the supplied MENU.
 - Never include items with "recommend": "No" — the public screen only shows winners.
 - recommendation_text must feel written for THIS moment, not a generic slogan. Reference the rain, the sunshine, the morning rush, the school-run, the cold evening, etc.
@@ -589,7 +616,6 @@ function sanitiseRecommendationText(text) {
     .replace(/\s+/g, " ")
     .trim();
 }
-
 
 async function callRecommendationLLM({ state, items, retryHint = null }) {
   if (!openai) {
@@ -709,16 +735,28 @@ async function buildRecommendationsViaLLM({ state, items }) {
   throw new Error("buildRecommendationsViaLLM: exhausted attempts");
 }
 
-function buildReasonString(item, weather) {
-  const weatherLabel = getWeatherLabel(
-    weather.weather_code,
-    weather.precipitation,
+// Structured reason string written to the Recommendation Log sheet.
+// Format: deterministic, audit-friendly — shows exactly the four signals
+// that drove the recommendation:
+//   1. The row's Recommendation Condition (column D of the sheet)
+//   2. Current temperature in °C
+//   3. Current sky state (sunny / partly-cloudy / overcast / rainy)
+//   4. Current behaviour_token (weekday-morning-rush / school-run / etc.)
+//
+// Replaces the previous LLM `reasoning` text so the log column is
+// consistent and machine-readable. Used as the `reason` value sent to
+// the Apps Script in notifyRecommendationRefresh().
+function buildReasonString(item, state) {
+  const condition = item.condition ? String(item.condition).trim() : "(no condition)";
+  const tempC = Math.round(Number(state?.weather?.temperature_c ?? 0));
+  const sky = state?.weather?.sky || "unknown";
+  const behaviour = state?.behaviour_token || "none";
+  return (
+    `Condition: "${condition}" | ` +
+    `Temp: ${tempC}°C | ` +
+    `Sky: ${sky} | ` +
+    `Behaviour: ${behaviour}`
   );
-  const tempC = Math.round(Number(weather.temperature_2m));
-  const conditionPart = item.condition
-    ? `condition "${item.condition}"`
-    : "no specific condition";
-  return `${conditionPart} matched (weather: ${weatherLabel}, ${tempC}°C)`;
 }
 
 // Login routes
@@ -923,11 +961,13 @@ async function buildRecommendationPayload() {
         imageUrl: item.url,
         score: Number(sel.score) || 0,
         // `reason` is what gets written to the Recommendation Log sheet's
-        // Reason column — the LLM's own `reasoning` field per the PDF
-        // schema, derived from its evaluation of the row's
-        // Recommendation Condition against the current state. We fall
-        // back to a synthetic state string only if the LLM omits it.
-        reason: sel.reasoning || buildReasonString(item, weather),
+        // Reason column. We use a deterministic synthetic string built
+        // from the row's condition + the current weather + sky + behaviour
+        // token so the log column is consistent and auditable. The LLM's
+        // free-text `reasoning` field is preserved separately for anyone
+        // who wants to read its narrative explanation.
+        reason: buildReasonString(item, state),
+        llmReasoning: sel.reasoning || "",
       };
     })
     .filter(Boolean)
