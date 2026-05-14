@@ -7,7 +7,9 @@ import { API_BASE } from "../utils/api";
 import { PiGlobeXBold } from "react-icons/pi";
 
 const ROTATION_INTERVAL_MS = 20 * 1000; // 20s per item on screen (incl. transition)
-const REFRESH_INTERVAL_MS = 20 * 60 * 1000; // refetch list (and AI text) every 20 min
+// PDF spec: backend rebuilds recommendations every 15 minutes — match it
+// here so the UI never lags behind the latest AI selection.
+const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // refetch list every 15 min
 const EXIT_ANIMATION_MS = 2500; // matches slideOut duration in index.css
 
 export default function BruRecommendationBoard() {

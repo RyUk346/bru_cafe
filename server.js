@@ -249,7 +249,8 @@ async function getCurrentWeather() {
     `https://api.open-meteo.com/v1/forecast` +
     `?latitude=${latitude}` +
     `&longitude=${longitude}` +
-    `&current=temperature_2m,precipitation,weather_code,is_day` +
+    `&current=temperature_2m,precipitation,weather_code,is_day,relative_humidity_2m,wind_speed_10m` +
+    `&wind_speed_unit=mph` +
     `&timezone=Europe%2FLondon`;
 
   const res = await fetch(url);
@@ -306,7 +307,20 @@ function parseFoodSheet(rows) {
 
   const headers = rows[0].map((h) => String(h || "").trim());
 
+  // New column order (per PDF / updated sheet):
+  //   A: Product Name
+  //   B: Product Type        (NEW — drink / food / dessert etc.)
+  //   C: Product Description
+  //   D: Recommendation Condition
+  //   E: Recommended         (output, written by Apps Script)
+  //   F: Recommendation Text (output, written by Apps Script)
+  //   G: Url
   const nameIdx = findHeaderIndex(headers, ["Product Name", "Name"]);
+  const typeIdx = findHeaderIndex(headers, [
+    "Product Type",
+    "Type",
+    "Category",
+  ]);
   const descIdx = findHeaderIndex(headers, [
     "Product Description",
     "Description",
@@ -330,6 +344,7 @@ function parseFoodSheet(rows) {
     .slice(1)
     .map((row) => ({
       productName: String(row[nameIdx] || "").trim(),
+      productType: typeIdx !== -1 ? String(row[typeIdx] || "").trim() : "",
       productDescription:
         descIdx !== -1 ? String(row[descIdx] || "").trim() : "",
       condition: condIdx !== -1 ? String(row[condIdx] || "").trim() : "",
@@ -341,301 +356,357 @@ function parseFoodSheet(rows) {
     .filter((item) => item.productName && item.url);
 }
 
-function evaluateCondition(condition, weather) {
-  if (!condition) return true;
+// ----------------- PDF-spec helpers (state vocabulary) -----------------
+//
+// All of these compute deterministically in the backend BEFORE the OpenAI
+// call, exactly as described in section 2 of the developer handover PDF.
+// The LLM stays focused on filtering + ranking — never on time/season math.
 
-  const text = String(condition).toLowerCase();
-  const tempC = Number(weather.temperature_2m);
-  const precipitation = Number(weather.precipitation || 0);
-  const weatherCode = Number(weather.weather_code);
-  const isDay = Boolean(weather.is_day);
-
-  let matchAll = true;
-
-  const between = text.match(
-    /temp\w*\s+between\s+(-?\d+(?:\.\d+)?)\s*(?:and|to|-)\s*(-?\d+(?:\.\d+)?)/,
+function getLondonNow() {
+  // A Date whose getHours/getDay/etc. all reflect Europe/London local time,
+  // regardless of what timezone the host server runs in. We do this by
+  // formatting the current instant in en-GB ISO-ish parts, then re-parsing.
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/London",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const map = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+  return new Date(
+    Number(map.year),
+    Number(map.month) - 1,
+    Number(map.day),
+    Number(map.hour === "24" ? "00" : map.hour),
+    Number(map.minute),
+    Number(map.second),
   );
-  if (between) {
-    const low = Number(between[1]);
-    const high = Number(between[2]);
-    matchAll = matchAll && tempC >= low && tempC <= high;
-  } else {
-    const aboveMatch = text.match(
-      /temp\w*\s+(?:above|over|greater than|more than|>=?|higher than)\s+(-?\d+(?:\.\d+)?)/,
-    );
-    if (aboveMatch) {
-      matchAll = matchAll && tempC > Number(aboveMatch[1]);
-    }
-
-    const belowMatch = text.match(
-      /temp\w*\s+(?:below|under|less than|lower than|<=?)\s+(-?\d+(?:\.\d+)?)/,
-    );
-    if (belowMatch) {
-      matchAll = matchAll && tempC < Number(belowMatch[1]);
-    }
-
-    const equalsMatch = text.match(
-      /temp\w*\s+(?:equals?|is|=)\s+(-?\d+(?:\.\d+)?)/,
-    );
-    if (equalsMatch) {
-      matchAll = matchAll && Math.round(tempC) === Number(equalsMatch[1]);
-    }
-  }
-
-  if (/\brain(?:y|ing)?\b/.test(text)) {
-    matchAll =
-      matchAll &&
-      (precipitation > 0 ||
-        [61, 63, 65, 66, 67, 80, 81, 82].includes(weatherCode));
-  }
-  if (/\bsunny\b|\bclear\b/.test(text)) {
-    matchAll = matchAll && weatherCode === 0;
-  }
-  if (/\bcloudy\b/.test(text)) {
-    matchAll = matchAll && [1, 2, 3].includes(weatherCode);
-  }
-  if (/\bsnow(?:y|ing)?\b/.test(text)) {
-    matchAll = matchAll && [71, 73, 75, 77, 85, 86].includes(weatherCode);
-  }
-  if (/\bfog(?:gy)?\b/.test(text)) {
-    matchAll = matchAll && [45, 48].includes(weatherCode);
-  }
-  if (/\bday(?:time)?\b/.test(text)) {
-    matchAll = matchAll && isDay;
-  }
-  if (/\bnight(?:time)?\b/.test(text)) {
-    matchAll = matchAll && !isDay;
-  }
-
-  return matchAll;
 }
 
-async function rankFoodItemsWithAI({ weather, items }) {
-  if (!items.length) return items;
-  if (!openai || items.length === 1) return items;
-
-  const weatherLabel = getWeatherLabel(
-    weather.weather_code,
-    weather.precipitation,
-  );
-
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: `
-You are ranking café menu items for a public display screen.
-
-You will receive the current weather and a list of pre-filtered food items
-(already known to be appropriate for the weather based on rules).
-
-Order them from MOST suitable to LEAST suitable for right now,
-considering weather, time of day, and typical café customer behaviour.
-
-Respond ONLY in valid JSON of the form:
-{ "order": ["Product Name 1", "Product Name 2", ...] }
-
-The "order" array MUST contain every input product name exactly once,
-spelled exactly as given.
-          `,
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            weather: {
-              temperatureC: weather.temperature_2m,
-              precipitation: weather.precipitation,
-              weatherCode: weather.weather_code,
-              weatherLabel,
-              isDay: weather.is_day,
-            },
-            items: items.map((i) => ({
-              productName: i.productName,
-              description: i.productDescription,
-            })),
-          }),
-        },
-      ],
-    });
-
-    const raw = response.choices[0].message.content.trim();
-    const parsed = JSON.parse(raw);
-    const order = Array.isArray(parsed?.order) ? parsed.order : [];
-
-    const byName = new Map(items.map((i) => [i.productName, i]));
-    const ordered = [];
-    for (const name of order) {
-      const item = byName.get(name);
-      if (item && !ordered.includes(item)) ordered.push(item);
-    }
-    for (const item of items) {
-      if (!ordered.includes(item)) ordered.push(item);
-    }
-
-    return ordered;
-  } catch (error) {
-    console.error("AI ranking failed:", error.message);
-    return items;
-  }
+// Returns a string offset like "+01:00" or "+00:00" for Europe/London now.
+function getLondonOffset() {
+  const offsetPart =
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      timeZoneName: "shortOffset",
+    })
+      .formatToParts(new Date())
+      .find((p) => p.type === "timeZoneName")?.value || "GMT";
+  const m = offsetPart.match(/GMT([+-]\d{1,2})(?::?(\d{2}))?/);
+  if (!m) return "+00:00";
+  const sign = m[1].startsWith("-") ? "-" : "+";
+  const hh = String(Math.abs(Number(m[1]))).padStart(2, "0");
+  const mm = m[2] || "00";
+  return `${sign}${hh}:${mm}`;
 }
 
-async function generateRecommendationTextForItem({ item, context }) {
-  if (!openai) {
-    console.warn(
-      `[AI text] OPENAI_API_KEY is missing — falling back for "${item.productName}"`,
-    );
-    return "";
-  }
-
-  // Try up to 2 times — transient OpenAI hiccups (rate limits, network)
-  // shouldn't permanently degrade an item to its "Try our X" fallback.
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        temperature: 0.9,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content: `
-You write ONE short, punchy café recommendation line for a digital screen.
-
-The line will appear inside a comic-book speech bubble next to a single
-menu item. It must feel hand-written for THIS item, not generic.
-
-Strict rules:
-- Maximum 12 words.
-- Sound like a cheeky, friendly barista talking to a customer.
-- Tie the line to the current weather and time of day where it feels natural.
-- Reference the item's flavour, texture, or vibe — not just its name.
-- No emojis, no hashtags, no quotation marks, no exclamation overload.
-- Do NOT use the product name as the entire line.
-
-Respond ONLY in valid JSON of the form:
-{ "text": "your single line here" }
-          `,
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              context,
-              item: {
-                productName: item.productName,
-                description: item.productDescription,
-                condition: item.condition,
-              },
-            }),
-          },
-        ],
-      });
-
-      const raw = response.choices[0]?.message?.content?.trim() || "";
-      let parsed;
-      try {
-        parsed = JSON.parse(raw);
-      } catch (parseErr) {
-        console.error(
-          `[AI text] JSON parse failed for "${item.productName}" (attempt ${attempt}). Raw response:`,
-          raw,
-        );
-        if (attempt < 2) continue;
-        return "";
-      }
-
-      // Be tolerant of slight prompt drift — accept text/line/recommendation
-      const text =
-        (typeof parsed?.text === "string" && parsed.text.trim()) ||
-        (typeof parsed?.line === "string" && parsed.line.trim()) ||
-        (typeof parsed?.recommendation === "string" &&
-          parsed.recommendation.trim()) ||
-        "";
-
-      if (!text) {
-        console.warn(
-          `[AI text] Empty text for "${item.productName}" (attempt ${attempt}). Parsed:`,
-          parsed,
-        );
-        if (attempt < 2) continue;
-        return "";
-      }
-
-      return text;
-    } catch (error) {
-      const status = error?.status || error?.response?.status;
-      const message = error?.message || String(error);
-      console.error(
-        `[AI text] OpenAI call failed for "${item.productName}" (attempt ${attempt}, status ${status || "n/a"}):`,
-        message,
-      );
-      if (attempt < 2) {
-        // brief backoff before retry
-        await new Promise((r) => setTimeout(r, 500));
-        continue;
-      }
-      return "";
-    }
-  }
-
-  return "";
+function getDayOfWeek(date) {
+  return [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+  ][date.getDay()];
 }
 
-function buildAiContext(weather) {
-  const weatherLabel = getWeatherLabel(
-    weather.weather_code,
-    weather.precipitation,
-  );
-  const tempC = Math.round(Number(weather.temperature_2m));
-  const partOfDay = (() => {
-    const hour = new Date().getHours();
-    if (hour < 11) return "morning";
-    if (hour < 15) return "lunchtime";
-    if (hour < 18) return "afternoon";
-    return "evening";
-  })();
+function getSeason(date) {
+  // UK meteorological seasons.
+  const m = date.getMonth() + 1; // 1-12
+  if (m >= 3 && m <= 5) return "Spring";
+  if (m >= 6 && m <= 8) return "Summer";
+  if (m >= 9 && m <= 11) return "Autumn";
+  return "Winter";
+}
+
+function getBehaviourToken(date) {
+  const dow = getDayOfWeek(date);
+  const isWeekend = dow === "Saturday" || dow === "Sunday";
+  const minutes = date.getHours() * 60 + date.getMinutes();
+
+  // Mon-Fri 06:30-09:30 — weekday-morning-rush
+  if (!isWeekend && minutes >= 6 * 60 + 30 && minutes <= 9 * 60 + 30) {
+    return "weekday-morning-rush";
+  }
+  // Sat-Sun 09:00-12:30 — weekend-brunch
+  if (isWeekend && minutes >= 9 * 60 && minutes <= 12 * 60 + 30) {
+    return "weekend-brunch";
+  }
+  // Mon-Fri 14:30-16:30 — school-run
+  if (!isWeekend && minutes >= 14 * 60 + 30 && minutes <= 16 * 60 + 30) {
+    return "school-run";
+  }
+  // Mon-Fri 16:30-19:00 — after-work
+  if (!isWeekend && minutes > 16 * 60 + 30 && minutes <= 19 * 60) {
+    return "after-work";
+  }
+  // Daily 21:00 and later — late-night
+  if (minutes >= 21 * 60) {
+    return "late-night";
+  }
+  return "none";
+}
+
+function getSkyState(weatherCode, precipitation = 0) {
+  // PDF vocabulary: sunny | partly-cloudy | overcast | rainy
+  if (
+    precipitation > 0 ||
+    [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(weatherCode)
+  ) {
+    return "rainy";
+  }
+  if (weatherCode === 0) return "sunny";
+  if ([1, 2].includes(weatherCode)) return "partly-cloudy";
+  if ([3, 45, 48].includes(weatherCode)) return "overcast";
+  if ([71, 73, 75, 77, 85, 86].includes(weatherCode)) return "rainy"; // snow → treat as rainy band
+  if ([95, 96, 99].includes(weatherCode)) return "rainy";
+  return "overcast";
+}
+
+// PDF section 5 — state hash for cache short-circuit.
+function buildStateHash(state) {
+  return [
+    Math.round(Number(state.weather.temperature_c) / 2) * 2, // 2°C bucket
+    state.weather.sky,
+    String(state.local_time).slice(0, 2), // hour bucket
+    state.day_of_week,
+    state.season,
+    state.behaviour_token,
+  ].join("|");
+}
+
+function buildCurrentState(weather) {
+  const now = getLondonNow();
+  const offset = getLondonOffset();
+  const pad = (n) => String(n).padStart(2, "0");
+  const localTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const isoLocal =
+    `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+    `T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}` +
+    offset;
+
+  const sky = getSkyState(weather.weather_code, weather.precipitation);
 
   return {
-    weatherLabel,
-    temperatureC: tempC,
-    precipitation: weather.precipitation,
-    isDay: weather.is_day,
-    partOfDay,
+    timestamp: isoLocal,
+    local_time: localTime,
+    day_of_week: getDayOfWeek(now),
+    season: getSeason(now),
+    behaviour_token: getBehaviourToken(now),
+    weather: {
+      temperature_c: Math.round(Number(weather.temperature_2m)),
+      sky,
+      // PDF section 2 — humidity/wind are reserved for future use but we
+      // pass them through now so the rule sheet can start referencing them
+      // without another backend deploy.
+      humidity_pct: Math.round(
+        Number(weather.relative_humidity_2m ?? weather.humidity_pct ?? 0),
+      ),
+      wind_mph: Math.round(
+        Number(weather.wind_speed_10m ?? weather.wind_mph ?? 0),
+      ),
+    },
   };
 }
 
-async function generateRecommendationTexts({ weather, items }) {
-  if (!items.length) return new Map();
+// ----------------- The PDF system prompt (sent verbatim) -----------------
+
+const RECOMMENDATION_SYSTEM_PROMPT = `You are the menu recommendation engine for Bru Oadby, a UK café and dessert shop in Leicestershire. Every 15 minutes you select 2-3 menu items to display on an in-store public screen, based on live weather, time, and customer behaviour signals.
+
+You will receive:
+1. CURRENT STATE — timestamp, local time, day of week, season, behaviour_token (one of: weekday-morning-rush, weekend-brunch, school-run, after-work, late-night, post-workout, none), and weather (temperature_c, sky one of sunny/partly-cloudy/overcast/rainy, humidity_pct, wind_mph).
+2. MENU — an array of items, each with product_name, product_type, product_description, and recommendation_condition (a natural-English rule describing when to recommend it).
+
+YOUR PROCESS:
+Step 1 — FILTER. For each menu item, evaluate whether its recommendation_condition is satisfied by the CURRENT STATE. Conditions reference temperature bands, sky states, time-of-day windows, day-of-week, season, and behaviour tokens in plain English. Some conditions also include "Do NOT recommend" clauses — respect those exclusions.
+
+Step 2 — SCORE each qualifying item on a 0-10 scale:
+ a) Centrality: how centrally the current temperature, time and sky sit inside the item's stated sweet-spot band (centre = higher).
+ b) Behaviour match: if the item's condition explicitly references the current behaviour_token, add 2 points.
+ c) Seasonal alignment: in-season = +1.
+ d) Day-part typicality: the product is being shown in its primary day-part (breakfast item in the morning, dessert in the evening, etc.) = +1.
+
+Step 3 — SELECT exactly 2 or 3 items, applying these tie-breakers in order:
+ 1. Highest score wins.
+ 2. Category diversity: when top scores are within 1 point of each other, mix product_types (one drink, one food, one dessert) before duplicating a category.
+ 3. Prefer signature/POPULAR items when scores tie: Spanish Rose Latte, Pistachio Latte, Strawbella shakes, Korean Tenders, Hot Dubai Chocolate Brownie, San Sebastian Cheesecake.
+ 4. Sort the final array by score descending (rank 1 = highest).
+
+EDGE CASES:
+- If 0 items qualify after Step 1, relax the rules slightly: pick the 2 items whose conditions are closest to the current state (smallest distance from temperature band, sky, or time window).
+- If exactly 1 item qualifies, return that item plus the next-closest near-miss.
+- If 4+ items would otherwise tie at the top, prefer category diversity, then signature items.
+
+OUTPUT — return strict JSON only. No markdown fences, no preamble, no commentary.
+{
+  "evaluated_at": "<ISO 8601 timestamp from input>",
+  "state_summary": "<one short sentence describing the live state>",
+  "selected": [
+    {
+      "rank": 1,
+      "product_name": "<exact product_name from menu — never invent>",
+      "recommend": "Yes",
+      "recommendation_text": "<customer-facing copy, max 14 words, references the current moment (weather, time, behaviour). No emojis, no hashtags, no exclamation marks.>",
+      "score": <0-10 number>,
+      "reasoning": "<one short internal sentence — why this item right now>"
+    }
+  ]
+}
+
+RULES:
+- selected array length MUST be 2 or 3.
+- Never invent products not in the supplied MENU.
+- Never include items with "recommend": "No" — the public screen only shows winners.
+- recommendation_text must feel written for THIS moment, not a generic slogan. Reference the rain, the sunshine, the morning rush, the school-run, the cold evening, etc.
+
+EXAMPLES OF GOOD recommendation_text:
+- Warming pistachio comfort for a grey autumn afternoon.
+- Iced matcha to match the bright weekend sunshine.
+- Hearty fuel before the cold Monday commute.
+- Soft tres leches for a sticky summer evening.`;
+
+// ----------------- Single-call recommendation -----------------
+
+function wordCount(str) {
+  return String(str || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function sanitiseRecommendationText(text) {
+  // Per PDF failure modes: strip emoji/exclamation marks before display,
+  // do not retry just for these.
+  return String(text || "")
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "") // emoji ranges
+    .replace(/!+/g, ".")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
+async function callRecommendationLLM({ state, items, retryHint = null }) {
   if (!openai) {
-    console.warn(
-      "[AI text] OPENAI_API_KEY is missing — no AI bubble text will be generated",
-    );
-    return new Map();
+    throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  const context = buildAiContext(weather);
+  const menu = items.map((i) => ({
+    product_name: i.productName,
+    product_type: i.productType || "uncategorised",
+    product_description: i.productDescription,
+    recommendation_condition: i.condition,
+  }));
 
-  // Run a separate OpenAI call per item, in parallel
-  const results = await Promise.all(
-    items.map(async (item) => {
-      const text = await generateRecommendationTextForItem({ item, context });
-      return [item.productName, text];
-    }),
-  );
+  const userPrompt =
+    `CURRENT STATE:\n${JSON.stringify(state, null, 2)}\n\n` +
+    `MENU:\n${JSON.stringify(menu, null, 2)}\n\n` +
+    `Return your selection as JSON now.` +
+    (retryHint ? `\n\n${retryHint}` : "");
 
-  const map = new Map();
-  for (const [name, text] of results) {
-    if (name && text) {
-      map.set(String(name).trim(), text);
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.2,
+    top_p: 0.9,
+    max_tokens: 800,
+    response_format: { type: "json_object" },
+    messages: [
+      { role: "system", content: RECOMMENDATION_SYSTEM_PROMPT },
+      { role: "user", content: userPrompt },
+    ],
+  });
+
+  const raw = response.choices[0]?.message?.content?.trim() || "";
+  return JSON.parse(raw);
+}
+
+function validateLlmResponse(parsed, items) {
+  const errors = [];
+  if (!parsed || typeof parsed !== "object") {
+    return ["response is not an object"];
+  }
+  const selected = parsed.selected;
+  if (!Array.isArray(selected)) {
+    return ["selected is not an array"];
+  }
+  if (selected.length < 2 || selected.length > 3) {
+    errors.push(`selected length ${selected.length} must be 2 or 3`);
+  }
+
+  const knownNames = new Set(items.map((i) => i.productName));
+  for (const sel of selected) {
+    if (!sel || typeof sel !== "object") {
+      errors.push("selected entry is not an object");
+      continue;
+    }
+    if (!knownNames.has(sel.product_name)) {
+      errors.push(`hallucinated product_name: ${sel.product_name}`);
+    }
+    // NOTE: We deliberately DO NOT treat `recommend: "No"` as a hard error.
+    // The PDF prompt tells the model "never include recommend=No in selected",
+    // but in practice the model sometimes contradicts itself: it picks an
+    // item as a winner (places it in `selected`) yet labels it `recommend: No`
+    // because none of the rules strictly matched and it relaxed per the
+    // edge-case clause. Membership of `selected` is the source of truth —
+    // we normalise `recommend` to "Yes" downstream and log a warning.
+    if (sel.recommend && String(sel.recommend).toLowerCase() === "no") {
+      console.warn(
+        `[recommendation] LLM put "${sel.product_name}" in selected but labelled recommend=No — accepting (selected wins) and normalising to Yes`,
+      );
+    }
+    if (wordCount(sel.recommendation_text) > 14) {
+      errors.push(
+        `recommendation_text >14 words for ${sel.product_name}: "${sel.recommendation_text}"`,
+      );
     }
   }
-  console.log(
-    `[AI text] generated ${map.size}/${items.length} bubble lines (failures fall back to sheet text)`,
-  );
-  return map;
+  return errors;
+}
+
+async function buildRecommendationsViaLLM({ state, items }) {
+  // Try once, retry once with a corrective hint, then throw.
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const parsed = await callRecommendationLLM({
+        state,
+        items,
+        retryHint:
+          attempt === 2
+            ? "Your previous response did not match the schema. Return valid JSON matching the schema. Try again."
+            : null,
+      });
+
+      const errors = validateLlmResponse(parsed, items);
+      if (errors.length) {
+        console.warn(
+          `[recommendation] LLM response validation failed (attempt ${attempt}):`,
+          errors,
+        );
+        if (attempt < 2) continue;
+        throw new Error(
+          `LLM response invalid after retry: ${errors.join("; ")}`,
+        );
+      }
+
+      return parsed;
+    } catch (error) {
+      console.error(
+        `[recommendation] OpenAI call failed (attempt ${attempt}):`,
+        error?.message || error,
+      );
+      if (attempt < 2) {
+        await new Promise((r) => setTimeout(r, 500));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error("buildRecommendationsViaLLM: exhausted attempts");
 }
 
 function buildReasonString(item, weather) {
@@ -731,12 +802,17 @@ app.use((req, res, next) => {
 // We cache the result so the screen loads instantly and AI calls only
 // happen ~once every CACHE_TTL_MS in the background.
 
-const RECOMMENDATION_CACHE_TTL_MS = 20 * 60 * 1000; // 20 minutes
+// PDF section 5 — refresh cadence is 15 minutes. The state-hash check
+// below means most ticks reuse the previous response anyway.
+const RECOMMENDATION_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+// PDF cost-optimisation: if the state hash hasn't changed AND the last
+// successful call was within this window, skip the OpenAI call entirely.
+const STATE_HASH_REUSE_MS = 2 * 60 * 60 * 1000; // 2 hours
 const RECOMMENDATION_CACHE_FILE = path.join(
   __dirname,
   ".recommendation-cache.json",
 );
-let recommendationCache = null; // { payload, timestamp }
+let recommendationCache = null; // { payload, timestamp, stateHash }
 let recommendationRefreshing = null; // in-flight refresh promise (dedupe)
 
 function looksLikeFallbackOnly(payload) {
@@ -816,44 +892,56 @@ async function buildRecommendationPayload() {
     throw new Error("No food items found in sheet");
   }
 
-  // The "Recommended" column is now OUTPUT-only — written back to the
-  // sheet by the Apps Script after this build. The decision of whether
-  // an item is recommended right now is driven entirely by its
-  // "Recommendation Condition" cell vs the current weather.
-  //
-  // Items whose condition matches → included → marked "Yes" in the sheet.
-  // Items whose condition doesn't match → excluded → marked "No".
-  // Items with a blank condition → always match (always Yes).
-  const matched = allItems.filter((item) =>
-    evaluateCondition(item.condition, weather),
-  );
+  // PDF approach: send the full menu to the LLM with the live state.
+  // The LLM filters, scores, and selects 2–3 items in a single call.
+  // (No local pre-filter — natural-English conditions are too nuanced
+  // for regex evaluation, and the LLM is cached aggressively.)
+  const state = buildCurrentState(weather);
+  const llmResponse = await buildRecommendationsViaLLM({
+    state,
+    items: allItems,
+  });
 
-  const ranked = await rankFoodItemsWithAI({ weather, items: matched });
+  const itemsByName = new Map(allItems.map((i) => [i.productName, i]));
+
+  const recommendations = (llmResponse.selected || [])
+    .map((sel) => {
+      const item = itemsByName.get(sel.product_name);
+      if (!item) return null;
+      const cleanText =
+        sanitiseRecommendationText(sel.recommendation_text) ||
+        item.recommendationText ||
+        item.productDescription ||
+        `Try our ${item.productName}`;
+      return {
+        rank: Number(sel.rank) || 0,
+        productName: item.productName,
+        productType: item.productType,
+        productDescription: item.productDescription,
+        recommendationText: cleanText,
+        condition: item.condition,
+        imageUrl: item.url,
+        score: Number(sel.score) || 0,
+        // `reason` is what gets written to the Recommendation Log sheet's
+        // Reason column — the LLM's own `reasoning` field per the PDF
+        // schema, derived from its evaluation of the row's
+        // Recommendation Condition against the current state. We fall
+        // back to a synthetic state string only if the LLM omits it.
+        reason: sel.reasoning || buildReasonString(item, weather),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.rank || 99) - (b.rank || 99));
 
   const weatherLabel = getWeatherLabel(
     weather.weather_code,
     weather.precipitation,
   );
 
-  const aiTexts = await generateRecommendationTexts({
-    weather,
-    items: ranked,
-  });
-
-  const recommendations = ranked.map((item) => ({
-    productName: item.productName,
-    productDescription: item.productDescription,
-    recommendationText:
-      aiTexts.get(item.productName) ||
-      item.recommendationText ||
-      item.productDescription ||
-      `Try our ${item.productName}`,
-    condition: item.condition,
-    imageUrl: item.url,
-    reason: buildReasonString(item, weather),
-  }));
-
   return {
+    evaluatedAt: llmResponse.evaluated_at || state.timestamp,
+    stateSummary: llmResponse.state_summary || "",
+    state,
     recommendations,
     weather: {
       temperatureC: weather.temperature_2m,
@@ -861,7 +949,12 @@ async function buildRecommendationPayload() {
       weatherCode: weather.weather_code,
       weatherLabel,
       isDay: weather.is_day,
+      humidityPct: state.weather.humidity_pct,
+      windMph: state.weather.wind_mph,
+      sky: state.weather.sky,
     },
+    behaviourToken: state.behaviour_token,
+    // Backwards-compat fields the old frontend bundle still reads.
     selectedFood: recommendations[0]?.productName || "",
     selectedImage: recommendations[0]?.imageUrl || "",
     message: recommendations[0]
@@ -941,9 +1034,48 @@ function refreshRecommendationsInBackground() {
 
   recommendationRefreshing = (async () => {
     try {
+      // PDF section 5 short-circuit: if state-hash hasn't changed and we
+      // have a recent successful response, just touch the timestamp and
+      // skip the OpenAI call entirely.
+      if (
+        recommendationCache &&
+        recommendationCache.stateHash &&
+        Date.now() - recommendationCache.timestamp < STATE_HASH_REUSE_MS
+      ) {
+        try {
+          const weather = await getCurrentWeather();
+          const state = buildCurrentState(weather);
+          const currentHash = buildStateHash(state);
+          if (currentHash === recommendationCache.stateHash) {
+            recommendationCache = {
+              ...recommendationCache,
+              timestamp: Date.now(),
+            };
+            console.log(
+              `[recommendation] state hash unchanged (${currentHash}) — reusing cached response, skipped OpenAI call`,
+            );
+            saveRecommendationCacheToDisk();
+            return;
+          }
+        } catch (err) {
+          // If the cheap check fails, fall through to the full rebuild.
+          console.warn(
+            "[recommendation] state-hash short-circuit failed, doing full rebuild:",
+            err.message,
+          );
+        }
+      }
+
       const payload = await buildRecommendationPayload();
-      recommendationCache = { payload, timestamp: Date.now() };
-      console.log("Recommendation cache refreshed");
+      const stateHash = payload.state ? buildStateHash(payload.state) : null;
+      recommendationCache = {
+        payload,
+        timestamp: Date.now(),
+        stateHash,
+      };
+      console.log(
+        `Recommendation cache refreshed (state=${stateHash || "n/a"})`,
+      );
       // Persist so the next server restart can serve instantly
       saveRecommendationCacheToDisk();
       // Fire-and-forget: tell the Apps Script to update the Food
