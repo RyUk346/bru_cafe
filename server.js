@@ -736,26 +736,39 @@ async function buildRecommendationsViaLLM({ state, items }) {
 }
 
 // Structured reason string written to the Recommendation Log sheet.
-// Format: deterministic, audit-friendly — shows exactly the four signals
-// that drove the recommendation:
-//   1. The row's Recommendation Condition (column D of the sheet)
-//   2. Current temperature in °C
-//   3. Current sky state (sunny / partly-cloudy / overcast / rainy)
-//   4. Current behaviour_token (weekday-morning-rush / school-run / etc.)
+// Format: deterministic, audit-friendly — shows the live state signals
+// the LLM evaluated against:
+//   • state_summary  — LLM's one-line description of the moment
+//   • Type           — Product Type from the sheet (column B)
+//   • Day            — day_of_week (Monday–Sunday)
+//   • Season         — Spring / Summer / Autumn / Winter
+//   • Temp           — temperature_c, °C
+//   • Sky            — sunny / partly-cloudy / overcast / rainy
+//   • Behaviour      — behaviour_token (weekday-morning-rush, etc.)
 //
-// Replaces the previous LLM `reasoning` text so the log column is
-// consistent and machine-readable. Used as the `reason` value sent to
-// the Apps Script in notifyRecommendationRefresh().
-function buildReasonString(item, state) {
-  const condition = item.condition ? String(item.condition).trim() : "(no condition)";
+// The row's Recommendation Condition (column D) is intentionally NOT
+// included — it's already in the sheet next to the row, so duplicating
+// it in the log just wastes column space.
+function buildReasonString(item, state, stateSummary = "") {
+  const summary = stateSummary ? String(stateSummary).trim() : "";
+  const type =
+    item && item.productType ? String(item.productType).trim() : "(no type)";
+  const day = state?.day_of_week || "unknown";
+  const season = state?.season || "unknown";
   const tempC = Math.round(Number(state?.weather?.temperature_c ?? 0));
   const sky = state?.weather?.sky || "unknown";
   const behaviour = state?.behaviour_token || "none";
+
+  const summaryPart = summary ? `${summary} | ` : "";
+
   return (
-    `Condition: "${condition}" | ` +
+    `Type: ${type} | ` +
+    `Day: ${day} | ` +
+    `Season: ${season} | ` +
     `Temp: ${tempC}°C | ` +
     `Sky: ${sky} | ` +
-    `Behaviour: ${behaviour}`
+    `Behaviour: ${behaviour}` +
+    `${summaryPart}`
   );
 }
 
@@ -961,12 +974,14 @@ async function buildRecommendationPayload() {
         imageUrl: item.url,
         score: Number(sel.score) || 0,
         // `reason` is what gets written to the Recommendation Log sheet's
-        // Reason column. We use a deterministic synthetic string built
-        // from the row's condition + the current weather + sky + behaviour
-        // token so the log column is consistent and auditable. The LLM's
-        // free-text `reasoning` field is preserved separately for anyone
-        // who wants to read its narrative explanation.
-        reason: buildReasonString(item, state),
+        // Reason column. We assemble a deterministic structured string
+        // from the LLM's `state_summary` + product type + day + season +
+        // weather + sky + behaviour token. The row's Recommendation
+        // Condition (column D) is intentionally omitted because the
+        // sheet already shows it next to the row. The LLM's narrative
+        // `reasoning` is preserved separately on `llmReasoning` if any
+        // future log column wants it.
+        reason: buildReasonString(item, state, llmResponse.state_summary),
         llmReasoning: sel.reasoning || "",
       };
     })
