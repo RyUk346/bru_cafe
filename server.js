@@ -591,6 +591,7 @@ RULES:
 - Never invent products not in the supplied MENU.
 - Never include items with "recommend": "No" — the public screen only shows winners.
 - recommendation_text must feel written for THIS moment, not a generic slogan. Reference the rain, the sunshine, the morning rush, the school-run, the cold evening, etc.
+- recommendation_text MUST be real customer-facing copy for every selected item, including items picked via the edge-case "relax the rules" path. NEVER write "N/A", "None", "TBD", "--", or any other placeholder — always write a genuine line, even if the fit is partial. If you struggle to write one, describe the item's flavour, texture, or vibe in the context of the current weather.
 
 EXAMPLES OF GOOD recommendation_text:
 - Warming pistachio comfort for a grey autumn afternoon.
@@ -607,14 +608,32 @@ function wordCount(str) {
     .filter(Boolean).length;
 }
 
+// Strings the LLM sometimes uses as a placeholder when it picked an
+// item via the edge-case "relax the rules" path and didn't generate
+// genuine customer-facing copy. We treat them as empty so the fallback
+// chain in buildRecommendationPayload (productDescription → "Try our X")
+// can substitute something usable.
+const PLACEHOLDER_TEXT_PATTERN =
+  /^(n\.?\/?a\.?|none|null|undefined|tbd|tba|--+|\.{2,})$/i;
+
 function sanitiseRecommendationText(text) {
   // Per PDF failure modes: strip emoji/exclamation marks before display,
   // do not retry just for these.
-  return String(text || "")
+  const cleaned = String(text || "")
     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "") // emoji ranges
     .replace(/!+/g, ".")
     .replace(/\s+/g, " ")
     .trim();
+
+  // If the LLM returned a placeholder ("N/A", "None", "TBD", "--", etc.)
+  // treat it as if it returned nothing — so the productDescription /
+  // "Try our X" fallback writes something real instead of leaking the
+  // placeholder into the Recommendation Log sheet.
+  if (PLACEHOLDER_TEXT_PATTERN.test(cleaned)) {
+    return "";
+  }
+
+  return cleaned;
 }
 
 async function callRecommendationLLM({ state, items, retryHint = null }) {
@@ -660,8 +679,10 @@ function validateLlmResponse(parsed, items) {
   if (!Array.isArray(selected)) {
     return ["selected is not an array"];
   }
-  if (selected.length < 2 || selected.length > 3) {
-    errors.push(`selected length ${selected.length} must be 2 or 3`);
+  // Match the count window declared in the system prompt above
+  // (currently 3 or 4 picks per refresh).
+  if (selected.length < 3 || selected.length > 4) {
+    errors.push(`selected length ${selected.length} must be 3 or 4`);
   }
 
   const knownNames = new Set(items.map((i) => i.productName));
@@ -759,7 +780,7 @@ function buildReasonString(item, state, stateSummary = "") {
   const sky = state?.weather?.sky || "unknown";
   const behaviour = state?.behaviour_token || "none";
 
-  const summaryPart = summary ? `${summary} | ` : "";
+  const summaryPart = summary ? `${summary}  ` : "";
 
   return (
     `Type: ${type} | ` +
@@ -767,8 +788,8 @@ function buildReasonString(item, state, stateSummary = "") {
     `Season: ${season} | ` +
     `Temp: ${tempC}°C | ` +
     `Sky: ${sky} | ` +
-    `Behaviour: ${behaviour}` +
-    `${summaryPart}`
+    `Behaviour: ${behaviour} |` +
+    `Summary: ${summaryPart}`
   );
 }
 
