@@ -332,7 +332,7 @@ export default function ScorePollWidget() {
     <div ref={boxRef} className="h-full w-full">
       <div className="flex h-full items-stretch gap-2">
         {/* content box — same style as the quote section */}
-        <div className="relative flex h-full flex-1 items-center gap-3 overflow-hidden rounded-lg bg-black/30 px-6 py-2 backdrop-blur-md">
+        <div className="relative flex h-full flex-1 items-center gap-3 overflow-hidden rounded-lg bg-black/10 px-6 py-2 backdrop-blur-md">
           {/* match label + status — top right corner */}
           {!loading && match && (
             <div className="absolute top-0 right-0 z-10 flex items-center gap-1.5 px-2.5 py-1 rounded-bl-xl bg-black/40 text-[14px] max-w-[60%]">
