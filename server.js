@@ -1730,10 +1730,13 @@ app.post("/api/submit-quote", async (req, res) => {
 
 // Serve product images hosted on the VPS (same-origin = always loads on the
 // locked-down screen). Nested category subfolders are served automatically,
-// e.g. product_images/desserts/cake-in-a-can.png -> /images/desserts/cake-in-a-can.png
+// e.g. product-images/Hot items/Hot_Coffee-Americano.png
+//   -> /bru_cafe/product-images/Hot%20items/Hot_Coffee-Americano.png
+// NOTE: the mount path "/product-images" must match BOTH the URL you put in
+// the sheet AND the folder name on disk (next to server.js).
 app.use(
-  "/images",
-  express.static(path.join(__dirname, "product_images"), { maxAge: "7d" }),
+  "/product-images",
+  express.static(path.join(__dirname, "product-images"), { maxAge: "7d" }),
 );
 
 // Serve frontend
