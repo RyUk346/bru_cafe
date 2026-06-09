@@ -180,8 +180,8 @@ export default function BruRecommendationBoard() {
       <div className="grid h-full grid-cols-13 gap-2">
         {/* LEFT: rotating recommended food image with caption */}
         <div className="col-span-3 w-[239px] flex h-[84vh] flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/30">
-          <div>
-            <h1 className="text-center text-[14px] font-bold">
+          <div className="border-b border-white/30 pb-2">
+            <h1 className="text-left text-[14px] font-sembold">
               How you Bru-ing?
             </h1>
           </div>
