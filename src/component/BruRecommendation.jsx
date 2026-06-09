@@ -5,6 +5,7 @@ import WeatherWidget from "./WeatherWidget";
 import useWeather from "../hooks/useWeather";
 import { API_BASE } from "../utils/api";
 import { PiGlobeXBold } from "react-icons/pi";
+import ScorePollWidget from "./ScorePollWidget";
 
 const ROTATION_INTERVAL_MS = 20 * 1000; // 20s per item on screen (incl. transition)
 // PDF spec: backend rebuilds recommendations every 15 minutes — match it
@@ -309,8 +310,11 @@ export default function BruRecommendationBoard() {
           <PiGlobeXBold className="text-red-500" />
         </div>
         {/* BOTTOM: quotes / QR section */}
-        <div className="col-span-13 h-35 max-[1750px]:h-15">
+        {/* <div className="col-span-13 h-35 max-[1750px]:h-15">
           <QuotesSection quotes={quotes} />
+        </div> */}
+        <div className="col-span-13 h-38 max-[1750px]:h-15">
+          <ScorePollWidget />
         </div>
       </div>
     </div>

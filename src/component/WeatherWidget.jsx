@@ -22,6 +22,11 @@ export default function WeatherWidget({
           <div className="text-2xl max-[1750px]:text-xl">⚠️</div>
           <div className="mt-1 text-sm font-medium text-white/80">Weather</div>
           <div className="text-xs text-red-300">Unavailable</div>
+          {error && typeof error === "string" ? (
+            <div className="mt-1 max-w-[140px] text-[10px] leading-tight text-red-300/70">
+              {error}
+            </div>
+          ) : null}
         </>
       ) : (
         <>

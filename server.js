@@ -268,26 +268,192 @@ function parseSheetDate(dateStr) {
 }
 
 // Weather
-async function getCurrentWeather() {
-  const latitude = 52.6369;
-  const longitude = -1.1398;
+//
+// PROVIDER 1 (primary): met.no — the Norwegian Met Institute API (powers
+//   Yr). Free, no key, licensed for COMMERCIAL use (CC-BY). This is what
+//   fixes the café screen: Open-Meteo's free tier is non-commercial only
+//   and was 502'ing / blocking us.
+// PROVIDER 2 (fallback): Open-Meteo — used automatically if met.no fails.
+//   If OPEN_METEO_API_KEY is set, the paid/commercial host is used.
+//
+// Both providers are normalised into the SAME shape Open-Meteo returns, so
+// every downstream consumer (getWeatherLabel, getSkyState, the frontend
+// widget) stays provider-agnostic and unchanged.
 
-  const url =
-    `https://api.open-meteo.com/v1/forecast` +
-    `?latitude=${latitude}` +
-    `&longitude=${longitude}` +
-    `&current=temperature_2m,precipitation,weather_code,is_day,relative_humidity_2m,wind_speed_10m` +
-    `&wind_speed_unit=mph` +
-    `&timezone=Europe%2FLondon`;
+const OPEN_METEO_API_KEY = process.env.OPEN_METEO_API_KEY || "";
+const OPEN_METEO_HOST = OPEN_METEO_API_KEY
+  ? "https://customer-api.open-meteo.com"
+  : "https://api.open-meteo.com";
+const OPEN_METEO_KEY_PARAM = OPEN_METEO_API_KEY
+  ? `&apikey=${OPEN_METEO_API_KEY}`
+  : "";
 
-  const res = await fetch(url);
-  const data = await res.json();
+// met.no REQUIRES an identifying User-Agent with contact info, or it
+// returns 403. (Also polite for Open-Meteo.)
+const WEATHER_HEADERS = {
+  "User-Agent":
+    "BruCafeScreen/1.0 hello@hyperglow.co.uk (+https://hyperglow.co.uk)",
+  Accept: "application/json",
+};
 
-  if (!res.ok) {
-    throw new Error("Failed to fetch weather");
+// Café coordinates. Widget + recommendation historically used slightly
+// different points; kept separate to preserve behaviour.
+const WIDGET_WEATHER_LAT = Number(process.env.VITE_WEATHER_LAT) || 52.5976;
+const WIDGET_WEATHER_LON = Number(process.env.VITE_WEATHER_LON) || -1.0833;
+const RECOMMENDATION_LAT = 52.6369;
+const RECOMMENDATION_LON = -1.1398;
+
+const MS_TO_MPH = 2.236936;
+
+// met.no uses text symbol_codes; our downstream code speaks numeric WMO
+// codes (as Open-Meteo returns). Translate to the nearest WMO code.
+function metnoSymbolToWmo(symbol = "") {
+  const s = String(symbol)
+    .replace(/_(day|night|polartwilight)$/, "")
+    .toLowerCase();
+  if (s === "clearsky") return 0;
+  if (s === "fair") return 1;
+  if (s === "partlycloudy") return 2;
+  if (s === "cloudy") return 3;
+  if (s === "fog") return 45;
+  if (/^lightrain(showers)?$/.test(s)) return 61; // light rain / drizzle band
+  if (s.includes("sleet")) return 66; // freezing-rain band
+  if (s.includes("snow")) return 73;
+  if (s.includes("thunder")) return 95;
+  if (s.includes("rain")) return 63; // any remaining rain
+  return 3; // safe default: cloudy
+}
+
+function metnoIsDay(symbol = "") {
+  return /_night$/.test(symbol) ? 0 : 1;
+}
+
+// Fetch met.no and normalise to Open-Meteo's shape.
+async function fetchFromMetNo(lat, lon) {
+  const fRes = await fetch(
+    `https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat}&lon=${lon}`,
+    { headers: WEATHER_HEADERS },
+  );
+  if (!fRes.ok) throw new Error(`met.no forecast failed: ${fRes.status}`);
+  const fData = await fRes.json();
+
+  const series = fData?.properties?.timeseries;
+  if (!Array.isArray(series) || !series.length) {
+    throw new Error("met.no forecast: empty timeseries");
   }
 
-  return data.current;
+  const now = series[0];
+  const instant = now?.data?.instant?.details || {};
+  const nextHour = now?.data?.next_1_hours || now?.data?.next_6_hours || {};
+  const symbol = nextHour?.summary?.symbol_code || "";
+  const curTemp = Number(instant.air_temperature);
+
+  // "Today" in Europe/London, plus the live UTC offset (defined later in
+  // this file — function declarations are hoisted, and these only run at
+  // request time).
+  const lnow = getLondonNow();
+  const pad = (n) => String(n).padStart(2, "0");
+  const todayLondon = `${lnow.getFullYear()}-${pad(lnow.getMonth() + 1)}-${pad(lnow.getDate())}`;
+  const offset = getLondonOffset();
+
+  // Daily max/min derived from the hourly series for today (London date).
+  const temps = series
+    .filter(
+      (e) =>
+        new Date(e.time)
+          .toLocaleString("sv-SE", { timeZone: "Europe/London" })
+          .slice(0, 10) === todayLondon,
+    )
+    .map((e) => Number(e?.data?.instant?.details?.air_temperature))
+    .filter((n) => Number.isFinite(n));
+  const tMax = temps.length ? Math.max(...temps) : curTemp;
+  const tMin = temps.length ? Math.min(...temps) : curTemp;
+
+  // Sunrise / sunset (separate met.no endpoint).
+  const sRes = await fetch(
+    `https://api.met.no/weatherapi/sunrise/3.0/sun?lat=${lat}&lon=${lon}` +
+      `&date=${todayLondon}&offset=${encodeURIComponent(offset)}`,
+    { headers: WEATHER_HEADERS },
+  );
+  if (!sRes.ok) throw new Error(`met.no sunrise failed: ${sRes.status}`);
+  const sData = await sRes.json();
+  const sunrise = sData?.properties?.sunrise?.time;
+  const sunset = sData?.properties?.sunset?.time;
+  if (!sunrise || !sunset) throw new Error("met.no sunrise: missing times");
+
+  return {
+    source: "met.no",
+    current: {
+      temperature_2m: curTemp,
+      weather_code: metnoSymbolToWmo(symbol),
+      is_day: metnoIsDay(symbol),
+      precipitation: Number(nextHour?.details?.precipitation_amount ?? 0),
+      relative_humidity_2m: Number(instant.relative_humidity ?? 0),
+      wind_speed_10m: Number(instant.wind_speed ?? 0) * MS_TO_MPH, // m/s -> mph
+    },
+    daily: {
+      sunrise: [sunrise],
+      sunset: [sunset],
+      temperature_2m_max: [tMax],
+      temperature_2m_min: [tMin],
+    },
+  };
+}
+
+// Open-Meteo fallback, normalised to the same shape. One call returns both
+// the rich `current` (recommendations) and `daily` (widget).
+async function fetchFromOpenMeteo(lat, lon) {
+  const url =
+    `${OPEN_METEO_HOST}/v1/forecast` +
+    `?latitude=${lat}` +
+    `&longitude=${lon}` +
+    `&current=temperature_2m,precipitation,weather_code,is_day,relative_humidity_2m,wind_speed_10m` +
+    `&daily=sunrise,sunset,temperature_2m_max,temperature_2m_min` +
+    `&wind_speed_unit=mph` +
+    `&timezone=auto` +
+    OPEN_METEO_KEY_PARAM;
+  const res = await fetch(url, { headers: WEATHER_HEADERS });
+  if (!res.ok) throw new Error(`Open-Meteo failed: ${res.status}`);
+  const data = await res.json();
+  if (!data?.current) throw new Error("Open-Meteo: missing current");
+  return {
+    source: "open-meteo",
+    current: data.current,
+    daily: data.daily || {},
+  };
+}
+
+// Provider chain: met.no first, Open-Meteo as automatic fallback. Retries
+// once per provider to ride out transient blips.
+async function fetchWeatherNormalised(lat, lon) {
+  const providers = [
+    () => fetchFromMetNo(lat, lon),
+    () => fetchFromOpenMeteo(lat, lon),
+  ];
+  let lastErr;
+  for (const provider of providers) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await provider();
+      } catch (err) {
+        lastErr = err;
+        console.warn(
+          `[weather] provider attempt ${attempt} failed:`,
+          err.message,
+        );
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+async function getCurrentWeather() {
+  const normalised = await fetchWeatherNormalised(
+    RECOMMENDATION_LAT,
+    RECOMMENDATION_LON,
+  );
+  return normalised.current;
 }
 
 function getWeatherLabel(weatherCode, precipitation = 0) {
@@ -591,7 +757,18 @@ RULES:
 - Never invent products not in the supplied MENU.
 - Never include items with "recommend": "No" — the public screen only shows winners.
 - recommendation_text must feel written for THIS moment, not a generic slogan. Reference the rain, the sunshine, the morning rush, the school-run, the cold evening, etc.
-- recommendation_text MUST be real customer-facing copy for every selected item, including items picked via the edge-case "relax the rules" path. NEVER write "N/A", "None", "TBD", "--", or any other placeholder — always write a genuine line, even if the fit is partial. If you struggle to write one, describe the item's flavour, texture, or vibe in the context of the current weather.
+- recommendation_text MUST be real customer-facing copy for EVERY selected item, including items picked via the edge-case "relax the rules" path. The line is shown to paying customers on a public screen — it must always sound like a friendly invitation to try the item.
+- FORBIDDEN phrases in recommendation_text — DO NOT WRITE these or anything similar, even when the fit is partial:
+    "N/A", "None", "TBD", "--",
+    "No recommendation",
+    "Not recommended",
+    "Cannot recommend",
+    "Unable to recommend",
+    "We don't recommend",
+    "Skip this item",
+    or any other refusal, disclaimer, or apology about the recommendation itself.
+- If an item's fit is weak, write copy that describes the item's flavour, texture, indulgence, or warmth/coolness instead — never write copy that says you can't recommend it. Example: instead of "Not recommended on a hot day", write "A rich classic worth a try whatever the weather".
+- If you truly cannot write a positive line for an item, DROP it from the selected array and pick a different item. NEVER include an item with a refusal line.
 
 EXAMPLES OF GOOD recommendation_text:
 - Warming pistachio comfort for a grey autumn afternoon.
@@ -613,8 +790,30 @@ function wordCount(str) {
 // genuine customer-facing copy. We treat them as empty so the fallback
 // chain in buildRecommendationPayload (productDescription → "Try our X")
 // can substitute something usable.
-const PLACEHOLDER_TEXT_PATTERN =
+
+// 1. Short tokens used as a whole reply: "N/A", "None", "TBD", "--", etc.
+const PLACEHOLDER_EXACT_PATTERN =
   /^(n\.?\/?a\.?|none|null|undefined|tbd|tba|--+|\.{2,})$/i;
+
+// 2. Refusal phrases — the model writes a longer sentence when it
+//    can't think of customer-facing copy:
+//      "No recommendation due to current weather conditions."
+//      "Not recommended at this time."
+//      "Cannot recommend this item right now."
+//      "Unable to provide a recommendation."
+//      "We don't recommend this for the current conditions."
+//    The regex requires the literal word "recommend" / "recommendation"
+//    to follow a negation, which avoids false positives like
+//    "no frills latte" or "not too sweet".
+const PLACEHOLDER_REFUSAL_PATTERN =
+  /\b(no\s+recommendation|not\s+recommend(ed|ing|able)?|cannot\s+recommend|can'?t\s+recommend|unable\s+to\s+(?:recommend|provide\s+a\s+recommend)|do(?:es)?\s*n'?t\s+recommend|refrain\s+from\s+recommend|skip\s+this\s+(?:item|recommendation))\b/i;
+
+function looksLikePlaceholder(text) {
+  if (!text) return true;
+  if (PLACEHOLDER_EXACT_PATTERN.test(text)) return true;
+  if (PLACEHOLDER_REFUSAL_PATTERN.test(text)) return true;
+  return false;
+}
 
 function sanitiseRecommendationText(text) {
   // Per PDF failure modes: strip emoji/exclamation marks before display,
@@ -625,11 +824,14 @@ function sanitiseRecommendationText(text) {
     .replace(/\s+/g, " ")
     .trim();
 
-  // If the LLM returned a placeholder ("N/A", "None", "TBD", "--", etc.)
-  // treat it as if it returned nothing — so the productDescription /
-  // "Try our X" fallback writes something real instead of leaking the
-  // placeholder into the Recommendation Log sheet.
-  if (PLACEHOLDER_TEXT_PATTERN.test(cleaned)) {
+  // If the LLM returned a placeholder ("N/A", "None") or a refusal
+  // phrase ("No recommendation due to…"), treat it as if it returned
+  // nothing — so the productDescription / "Try our X" fallback can
+  // substitute something real before the row reaches the log sheet.
+  if (looksLikePlaceholder(cleaned)) {
+    console.warn(
+      `[recommendation] placeholder/refusal text detected and dropped: "${cleaned}"`,
+    );
     return "";
   }
 
@@ -980,9 +1182,13 @@ async function buildRecommendationPayload() {
     .map((sel) => {
       const item = itemsByName.get(sel.product_name);
       if (!item) return null;
+      // Fallback chain — each layer is run through the sanitiser so
+      // refusal phrases that previously got written to the sheet
+      // ("No recommendation due to current weather conditions.") can't
+      // leak in from the persisted Recommendation Text column.
       const cleanText =
         sanitiseRecommendationText(sel.recommendation_text) ||
-        item.recommendationText ||
+        sanitiseRecommendationText(item.recommendationText) ||
         item.productDescription ||
         `Try our ${item.productName}`;
       return {
@@ -1268,6 +1474,44 @@ app.post("/api/log-recommendation", async (req, res) => {
   return res.json({ success: true, deprecated: true });
 });
 
+// API: Weather (proxy for the screen's WeatherWidget)
+//
+// The in-store screen's browser is locked down to this origin and cannot
+// reach external weather APIs directly (cross-origin request → "Failed to
+// fetch"). The Node server fetches on its behalf via the provider chain
+// (met.no primary, Open-Meteo fallback) so the browser only ever talks to
+// its own origin. Response is cached briefly so polling from every screen
+// doesn't hammer the upstream providers.
+const WIDGET_WEATHER_TTL_MS = 5 * 60 * 1000; // 5 minutes
+let widgetWeatherCache = null; // { data, timestamp }
+
+app.get("/api/weather", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  try {
+    if (
+      widgetWeatherCache &&
+      Date.now() - widgetWeatherCache.timestamp < WIDGET_WEATHER_TTL_MS
+    ) {
+      return res.json(widgetWeatherCache.data);
+    }
+
+    const data = await fetchWeatherNormalised(
+      WIDGET_WEATHER_LAT,
+      WIDGET_WEATHER_LON,
+    );
+    widgetWeatherCache = { data, timestamp: Date.now() };
+    return res.json(data);
+  } catch (error) {
+    console.error("api/weather error:", error.message);
+    // Serve stale cache rather than breaking the widget on a transient blip.
+    if (widgetWeatherCache) {
+      return res.json(widgetWeatherCache.data);
+    }
+    return res.status(502).json({ error: error.message });
+  }
+});
+
 // API: Quotes only
 app.get("/api/sheets", async (req, res) => {
   res.set("Cache-Control", "no-store");
@@ -1483,6 +1727,14 @@ app.post("/api/submit-quote", async (req, res) => {
     });
   }
 });
+
+// Serve product images hosted on the VPS (same-origin = always loads on the
+// locked-down screen). Nested category subfolders are served automatically,
+// e.g. product_images/desserts/cake-in-a-can.png -> /images/desserts/cake-in-a-can.png
+app.use(
+  "/images",
+  express.static(path.join(__dirname, "product_images"), { maxAge: "7d" }),
+);
 
 // Serve frontend
 app.use(express.static(path.join(__dirname, "dist")));

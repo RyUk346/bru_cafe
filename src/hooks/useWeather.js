@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { API_BASE } from "../utils/api";
 
 import sunnyDay from "../assets/weather/Sunny.png";
 import clearNight from "../assets/weather/clear-night.png";
@@ -12,10 +13,10 @@ import snow from "../assets/weather/Snow.png";
 import thunderstorm from "../assets/weather/thunderstorm.png";
 import fallback from "../assets/weather/default.png";
 
-const lat = import.meta.env.VITE_WEATHER_LAT;
-const lon = import.meta.env.VITE_WEATHER_LON;
-
-const WEATHER_API_URL = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&daily=sunrise,sunset,temperature_2m_max,temperature_2m_min&timezone=auto`;
+// Call our own server (same-origin) instead of api.open-meteo.com directly.
+// The in-store screen's browser can't reach external domains; the server
+// proxies the request. See /api/weather in server.js.
+const WEATHER_API_URL = `${API_BASE}/api/weather`;
 function isDayTime(sunrise, sunset) {
   const now = new Date();
   const sunriseTime = new Date(sunrise);
@@ -132,6 +133,9 @@ export default function useWeather() {
         });
         }
       } catch (error) {
+        console.error("[useWeather] fetch failed:", error, {
+          url: WEATHER_API_URL,
+        });
         if (isMounted) {
           setWeather((prev) => ({
             ...prev,
