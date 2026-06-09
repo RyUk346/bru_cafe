@@ -1016,7 +1016,7 @@ app.get("/server-login", (req, res) => {
       httpOnly: true,
       sameSite: "lax",
       secure: false,
-      maxAge: 1000 * 60 * 60 * 24 * 30,
+      maxAge: 1000 * 60 * 60 * 24 * 365 * 10, // ~10 years — effectively permanent
       path: "/",
     });
 
