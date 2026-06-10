@@ -300,7 +300,12 @@ export default function ScorePollWidget() {
   }, []);
   const PAD_Y = 16; // py-2 (8px top + 8px bottom)
   const inner = Math.max(0, boxH - PAD_Y);
-  const qrSize = Math.max(50, boxH - 2); // QR sits outside the box, full height
+  // Fixed QR size (independent of the strip height) so it's reliably large
+  // enough to scan from across the room. It's bottom-anchored in its column,
+  // so anything taller than the strip overflows upward into the empty space
+  // above — never off the bottom of the screen. Tweak this one number to
+  // resize the QR everywhere in this widget.
+  const qrSize = 200;
   const flagH = Math.max(38, Math.round(inner * 0.52));
   const flagW = Math.round(flagH * 1.6);
 
@@ -401,7 +406,7 @@ export default function ScorePollWidget() {
 
         {/* QR — outside the box, in its own right column (like the quote section) */}
         {!loading && (
-          <div className="flex h-full flex-col items-center justify-center shrink-0">
+          <div className="flex h-full flex-col items-center justify-end shrink-0">
             {/* One constant QR for every slide — always the generic vote page
                 (which already lists all matches). Keeping the value fixed means
                 the code never changes, so a camera can stay locked on it. */}
