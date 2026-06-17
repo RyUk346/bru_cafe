@@ -179,7 +179,7 @@ export default function BruRecommendationBoard() {
     <div className="h-screen w-screen overflow-hidden p-2 text-white">
       <div className="grid h-full grid-cols-13 gap-2">
         {/* LEFT: rotating recommended food image with caption */}
-        <div className="col-span-3 w-[239px] flex h-[84vh] flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/30">
+        <div className="col-span-3 w-[239px] flex h-full flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/20">
           <div className="border-b border-white/50 pb-2">
             <h1 className="text-xl font-bold tracking-wide">
               How you Bru-ing?
@@ -318,9 +318,9 @@ export default function BruRecommendationBoard() {
         {/* <div className="col-span-13 h-35 max-[1750px]:h-15">
           <QuotesSection quotes={quotes} />
         </div> */}
-        <div className="col-span-13 h-38 max-[1750px]:h-15">
+        {/* <div className="col-span-13 h-38 max-[1750px]:h-15">
           <ScorePollWidget />
-        </div>
+        </div> */}
       </div>
     </div>
   );

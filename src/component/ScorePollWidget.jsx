@@ -60,8 +60,20 @@ const fmtKickoffUK = (iso) =>
     minute: "2-digit",
   }).format(new Date(iso));
 
+// Played minute. The free football-data tier usually omits `minute`, so when
+// it's missing we approximate from kickoff (best-effort, ignores the half-time
+// break) to still show "how long it's been playing".
+const playedMinute = (m) => {
+  if (m.minute) return m.minute;
+  const mins = Math.floor((Date.now() - new Date(m.kickoff).getTime()) / 60000);
+  return mins >= 0 && mins <= 130 ? mins : null;
+};
+
 const statusLine = (m) => {
-  if (m.status === "IN_PLAY") return m.minute ? `LIVE ${m.minute}'` : "LIVE";
+  if (m.status === "IN_PLAY") {
+    const min = playedMinute(m);
+    return min != null ? `LIVE ${min}'` : "LIVE";
+  }
   if (m.status === "PAUSED") return "HALF-TIME";
   if (m.status === "FINISHED") return "FULL-TIME";
   return fmtKickoffUK(m.kickoff);
@@ -103,13 +115,20 @@ function useFixtures() {
   return { fixtures: fixtures || [], loading };
 }
 
+// Last successfully fetched votes, kept per match. When the connection drops,
+// each match keeps showing its own last-known numbers (never blank, never the
+// wrong match's numbers, and no error shown).
+const VOTE_CACHE = {};
+
 function useVotes(matchId) {
-  const [votes, setVotes] = useState({});
+  const [votes, setVotes] = useState(() => (matchId && VOTE_CACHE[matchId]) || {});
   useEffect(() => {
     if (!matchId) {
       setVotes({});
       return;
     }
+    // Show whatever we last had for this match straight away.
+    setVotes(VOTE_CACHE[matchId] || {});
     let active = true;
     const load = async () => {
       try {
@@ -117,9 +136,12 @@ function useVotes(matchId) {
           `${DB_URL}/polls/${encodeURIComponent(matchId)}/votes.json`,
         );
         const data = await res.json();
-        if (active) setVotes(data || {});
+        if (active) {
+          VOTE_CACHE[matchId] = data || {};
+          setVotes(VOTE_CACHE[matchId]);
+        }
       } catch {
-        /* ignore */
+        /* offline: keep the last-known votes for this match */
       }
     };
     load();
