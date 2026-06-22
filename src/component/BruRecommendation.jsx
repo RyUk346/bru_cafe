@@ -246,7 +246,7 @@ export default function BruRecommendationBoard() {
                   <img
                     src={current.imageUrl}
                     alt={current.productName}
-                    className="w-full h-full object-scale-down"
+                    className="block w-[480px] h-full object-cover"
                   />
 
                   {/* <div className="inset-x-0 bottom-0 bg-gradient-to-t from-black/60 to-transparent p-3 text-center">
