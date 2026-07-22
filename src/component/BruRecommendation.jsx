@@ -6,6 +6,7 @@ import useWeather from "../hooks/useWeather";
 import { API_BASE } from "../utils/api";
 import { PiGlobeXBold } from "react-icons/pi";
 import ScorePollWidget from "./ScorePollWidget";
+import GoogleReviews from "./GoogleReviews";
 
 const ROTATION_INTERVAL_MS = 20 * 1000; // 20s per item on screen (incl. transition)
 // PDF spec: backend rebuilds recommendations every 15 minutes — match it
@@ -186,6 +187,9 @@ export default function BruRecommendationBoard() {
             </h1>
           </div>
           <div className="mt-4 flex flex-1 flex-col overflow-hidden max-[1750px]:mt-3">
+            {/* Google reviews — rotating 5-star reviews (replaces recommendation text) */}
+            <GoogleReviews />
+
             {recommendationError && !current ? (
               <div className="flex h-full items-center justify-center rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-4 text-center text-red-300">
                 {recommendationError}
@@ -201,12 +205,11 @@ export default function BruRecommendationBoard() {
                   isExiting ? " exiting" : ""
                 }`}
               >
-                {/* Recommendation text shown ABOVE the image — comic-book speech bubble.
-                    Text comes from the backend (AI-generated, served from cache).
-                    Each layer is an inline SVG. The path uses quadratic curves
-                    (Q commands) at every polygon vertex to round each corner
-                    — fill only, no stroke. The angled top edge is preserved
-                    exactly between curves. */}
+                {/* RECOMMENDATION TEXT speech bubble — temporarily disabled.
+                    Showing Google reviews instead (see <GoogleReviews /> above).
+                    To restore: remove <GoogleReviews /> above and uncomment the
+                    block below.
+
                 {current.recommendationText ? (
                   <div className="speech-bubble speech-bubble-enter mx-1">
                     <div className="speech-bubble-back">
@@ -241,6 +244,7 @@ export default function BruRecommendationBoard() {
                     </div>
                   </div>
                 ) : null}
+                */}
 
                 <div className="image-enter flex-1 overflow-hidden rounded-lg">
                   <img
