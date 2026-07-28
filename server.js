@@ -24,6 +24,12 @@ const QUOTE_SCRIPT_URL = process.env.QUOTE_SCRIPT_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const QUOTE_SHEET_ID = process.env.QUOTE_SHEET_ID;
 const BRU_FOOD_SHEET_ID = process.env.BRU_FOOD_SHEET_ID;
+const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY || "";
+// Google Maps "data_id" for the reviews widget (the 0x...:0x... hex that
+// identifies the place). Defaults to Bru Coffee & Gelato Oadby; override via
+// GOOGLE_PLACE_ID in .env.
+const GOOGLE_PLACE_ID =
+  process.env.GOOGLE_PLACE_ID || "0x487765125658a20b:0x6d1b077817c1ddd3";
 
 const SCREEN_LOGIN_TOKEN = process.env.SCREEN_LOGIN_TOKEN;
 const AUTH_COOKIE_SECRET = process.env.AUTH_COOKIE_SECRET;
@@ -1508,6 +1514,154 @@ app.get("/api/weather", async (req, res) => {
     if (widgetWeatherCache) {
       return res.json(widgetWeatherCache.data);
     }
+    return res.status(502).json({ error: error.message });
+  }
+});
+
+// API: Google reviews (proxy for the screen's GoogleReviews widget)
+//
+// Reads PUBLIC Google reviews via SerpApi's Google Maps Reviews engine (no
+// Google Business Profile login required) and returns the latest 5-star
+// reviews. Runs server-side so the SerpApi key stays secret and the
+// locked-down screen browser only ever talks to its own origin.
+//
+// New reviews always land on PAGE 1 (newest-first), so each refresh only needs
+// page 1 — we merge any new 5-star-with-text reviews into the kept list of 6.
+// We page deeper ONLY to seed the list to 6 the first time (many recent Google
+// reviews are star-only, so 6 with text can span several pages). After that
+// it's one page per refresh.
+//
+// Free-tier budget (SerpApi free = 250 searches/month, no card):
+//   • Auto refresh every 6h = 4 pulls/day × 1 page ≈ 120 searches/month.
+//   • The frontend's hourly polling is served from the in-memory cache below,
+//     so it never hits SerpApi.
+//   • Refresh is 6h apart — beyond SerpApi's own ~1h cache window — so each
+//     pull picks up newly-posted reviews automatically, no no_cache needed.
+//   • A one-off deeper seed (≤4 pages) runs on first request / after a restart.
+const GOOGLE_REVIEWS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const GOOGLE_REVIEWS_MAX = 6; // 5-star reviews kept and shown
+const GOOGLE_REVIEWS_SEED_PAGES = 4; // max pages when first seeding the list
+let googleReviewsCache = null; // { data: { reviews }, timestamp }
+
+async function fetchSerpReviewPage(pageToken = null, forceFresh = false) {
+  const url =
+    "https://serpapi.com/search.json?engine=google_maps_reviews" +
+    `&data_id=${encodeURIComponent(GOOGLE_PLACE_ID)}` +
+    "&sort_by=newestFirst&hl=en" +
+    `&api_key=${encodeURIComponent(SERPAPI_API_KEY)}` +
+    // Auto pulls are 6h apart (beyond SerpApi's cache) so they get fresh data
+    // without no_cache. Only the manual endpoint forces a live scrape.
+    (forceFresh ? "&no_cache=true" : "") +
+    (pageToken ? `&next_page_token=${encodeURIComponent(pageToken)}` : "");
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`SerpApi HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(`SerpApi: ${json.error}`);
+  return json;
+}
+
+// Keep only 5-star reviews that have written text (skip star-only ratings).
+function extractFiveStarWithText(json) {
+  const out = [];
+  for (const r of json.reviews || []) {
+    const rating = Number(r.rating) || 0;
+    const text = (r.snippet || "").trim();
+    if (rating !== 5 || !text) continue;
+    out.push({
+      id: r.review_id || r.link || null,
+      name: r.user?.name || "Google user",
+      avatarUrl: r.user?.thumbnail || "",
+      text,
+      rating,
+      timestamp: r.iso_date ? Date.parse(r.iso_date) : 0,
+    });
+  }
+  return out;
+}
+
+// Merge incoming into existing, de-dupe by id, keep the newest MAX.
+function mergeReviews(existing, incoming) {
+  const seen = new Map();
+  for (const r of [...incoming, ...existing]) {
+    const key = r.id || `${r.name}|${r.timestamp}`;
+    if (!seen.has(key)) seen.set(key, r);
+  }
+  return [...seen.values()]
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, GOOGLE_REVIEWS_MAX);
+}
+
+// Refresh the kept list: always read page 1 (catches new reviews), then page
+// deeper only while we still don't have MAX (first-time seed).
+async function refreshGoogleReviews(forceFresh = false) {
+  const current = googleReviewsCache?.data?.reviews || [];
+
+  let json = await fetchSerpReviewPage(null, forceFresh); // page 1 (newest)
+  let merged = mergeReviews(current, extractFiveStarWithText(json));
+
+  let pageToken = json.serpapi_pagination?.next_page_token || null;
+  let page = 1;
+  while (
+    merged.length < GOOGLE_REVIEWS_MAX &&
+    pageToken &&
+    page < GOOGLE_REVIEWS_SEED_PAGES
+  ) {
+    json = await fetchSerpReviewPage(pageToken, forceFresh);
+    merged = mergeReviews(merged, extractFiveStarWithText(json));
+    pageToken = json.serpapi_pagination?.next_page_token || null;
+    page += 1;
+  }
+
+  googleReviewsCache = { data: { reviews: merged }, timestamp: Date.now() };
+  return merged;
+}
+
+app.get("/api/google-reviews", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  // No key configured yet — return an empty list so the widget just hides.
+  if (!SERPAPI_API_KEY) {
+    return res.json({ reviews: [] });
+  }
+
+  try {
+    if (
+      googleReviewsCache &&
+      Date.now() - googleReviewsCache.timestamp < GOOGLE_REVIEWS_TTL_MS
+    ) {
+      return res.json(googleReviewsCache.data);
+    }
+
+    const reviews = await refreshGoogleReviews();
+    return res.json({ reviews });
+  } catch (error) {
+    console.error("api/google-reviews error:", error.message);
+    // Serve stale cache rather than breaking the widget on a transient blip.
+    if (googleReviewsCache) {
+      return res.json(googleReviewsCache.data);
+    }
+    return res.status(502).json({ reviews: [], error: error.message });
+  }
+});
+
+// API: OPTIONAL manual refresh. With the 6h auto-refresh above, new reviews
+// appear on their own within 6h — this endpoint is just a "show it right now"
+// shortcut (e.g. straight after posting a review). It forces a fresh live
+// scrape and merges any new reviews into the kept list. Open the URL in a
+// browser; it reports how many 5-star reviews are currently shown.
+app.get("/api/refresh-google-reviews", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  if (!SERPAPI_API_KEY) {
+    return res.status(400).json({ error: "SERPAPI_API_KEY is not set" });
+  }
+
+  try {
+    const reviews = await refreshGoogleReviews(true); // force fresh scrape now
+    return res.json({ success: true, count: reviews.length, reviews });
+  } catch (error) {
+    console.error("api/refresh-google-reviews error:", error.message);
     return res.status(502).json({ error: error.message });
   }
 });

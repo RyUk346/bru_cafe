@@ -1,28 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { FcGoogle } from "react-icons/fc";
+import { API_BASE } from "../utils/api";
 
 /* ──────────────────────────────────────────────────────────────────────────
-   GOOGLE REVIEWS (via Featurable — free, no Google login / API key required)
+   GOOGLE REVIEWS
 
-   HOW TO CONNECT THIS CAFE'S REVIEWS:
-     1. Go to https://featurable.com and create a free account.
-     2. Create a new widget and search for the cafe's Google Business listing
-        (the same place as your Google review link).
-     3. In the widget settings, set the minimum rating to 5 stars (optional —
-        we also filter to 5-star below) and let it pull the reviews.
-     4. Click  Embed  ->  API. Copy ONLY the widget UUID at the END of the URL
-        (e.g. from .../v2/widgets/0cde5c9c-...  copy just "0cde5c9c-..."),
-        NOT the whole URL.
-     5. Paste that UUID into FEATURABLE_WIDGET_ID below.
+   Reviews come from this app's own backend (GET /api/google-reviews), which
+   reads PUBLIC Google reviews via Outscraper and returns the latest 5-star
+   reviews. No Google Business Profile login is required, and the Outscraper
+   API key stays server-side (see server.js + .env → OUTSCRAPER_API_KEY).
 
-   Uses the Featurable v2 API. Set the ID to "example" to preview sample data.
+   The backend already filters to 5-star, sorts newest-first, caps the list to
+   6, and caches ~12h — so this component just displays and rotates the result.
+   Each review: { id, name, avatarUrl, text, rating, timestamp }.
    ────────────────────────────────────────────────────────────────────────── */
-const FEATURABLE_WIDGET_ID = "0cde5c9c-3a50-434c-b590-57625e6af9ca";
-
-const FEATURABLE_API = (id) => `https://api.featurable.com/v2/widgets/${id}`;
-
 const ROTATE_INTERVAL_MS = 10 * 1000; // show each review for 10s
-const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // re-fetch reviews hourly
+const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // re-check the backend hourly
 const MAX_REVIEWS = 6; // show up to 6 five-star reviews
 
 export default function GoogleReviews() {
@@ -35,27 +28,18 @@ export default function GoogleReviews() {
     listRef.current = reviews;
   }, [reviews]);
 
-  // Fetch + filter to five-star reviews
+  // Fetch the latest 5-star reviews from our backend
   useEffect(() => {
     let cancelled = false;
 
     async function loadReviews() {
       try {
-        const res = await fetch(FEATURABLE_API(FEATURABLE_WIDGET_ID));
+        const res = await fetch(`${API_BASE}/api/google-reviews`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const json = await res.json();
-        // v2 shape: json.widget.reviews[]  (fall back to v1 json.reviews[])
-        const rawReviews = json.widget?.reviews || json.reviews || [];
-        const fiveStar = rawReviews
-          .map((r) => ({
-            id: r.id ?? r.reviewId ?? null,
-            name: r.author?.name || r.reviewer?.displayName || "Google user",
-            avatarUrl: r.author?.avatarUrl || r.reviewer?.profilePhotoUrl || "",
-            text: (r.text ?? r.comment ?? "").trim(),
-            rating: r.rating?.value ?? r.starRating ?? 0,
-          }))
-          .filter((r) => r.rating === 5 && r.text)
+        const fiveStar = (json.reviews || [])
+          .filter((r) => (r.rating ?? 0) === 5 && r.text && r.text.trim())
           .slice(0, MAX_REVIEWS);
 
         if (cancelled) return;
@@ -96,7 +80,7 @@ export default function GoogleReviews() {
   if (!reviews.length) return null;
 
   const review = reviews[index];
-  const name = review.name;
+  const name = review.name || "Google user";
 
   return (
     <div className="mb-3 shrink-0">
