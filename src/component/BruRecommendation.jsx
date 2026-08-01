@@ -6,12 +6,25 @@ import useWeather from "../hooks/useWeather";
 import { API_BASE } from "../utils/api";
 import { PiGlobeXBold } from "react-icons/pi";
 import ScorePollWidget from "./ScorePollWidget";
+import GoogleReviews from "./GoogleReviews";
 
-const ROTATION_INTERVAL_MS = 20 * 1000; // 20s per item on screen (incl. transition)
+const ROTATION_INTERVAL_MS = 17 * 1000; // 20s per item on screen (incl. transition)
 // PDF spec: backend rebuilds recommendations every 15 minutes — match it
 // here so the UI never lags behind the latest AI selection.
 const REFRESH_INTERVAL_MS = 15 * 60 * 1000; // refetch list every 15 min
-const EXIT_ANIMATION_MS = 2500; // matches slideOut duration in index.css
+const EXIT_ANIMATION_MS = 3000; // matches slideOut duration in index.css
+// The left panel loops between two full views forever:
+//   UI 1 — recommendation (image + speech-bubble recommendation text)
+//   UI 2 — Google reviews (vertical carousel, scrolling bottom → top)
+// UI 1 runs the image carousel this many FULL passes before handing over
+// to UI 2. With ~3 items at 20s each (17s on screen + ~3s slide), one pass
+// ≈ 1 minute, so 3 passes ≈ 3 minutes — but it's counted in rotations,
+// not wall-clock time, so the UI never cuts an image off mid-turn.
+const RECOMMENDATION_PASSES = 3;
+// Each review holds the top of the carousel for this long; UI 2 stays on
+// screen exactly long enough for EVERY review to take a full turn, so all
+// 6 reviews are always shown before looping back to UI 1.
+const REVIEW_STEP_MS = 5 * 1000;
 
 export default function BruRecommendationBoard() {
   const weather = useWeather();
@@ -24,6 +37,13 @@ export default function BruRecommendationBoard() {
   // we swap to the new one.
   const [displayedIndex, setDisplayedIndex] = useState(0);
   const [isExiting, setIsExiting] = useState(false);
+  // Which full-panel view is on screen: "recommendation" (UI 1) or
+  // "reviews" (UI 2). The two alternate in an infinite loop — UI 1 runs
+  // through every recommendation once, then UI 2 shows the Google reviews
+  // for REVIEWS_VIEW_MS, then back to UI 1, forever.
+  const [view, setView] = useState("recommendation");
+  const [reviewsCount, setReviewsCount] = useState(0);
+  const hasReviews = reviewsCount > 0;
   const [recommendationError, setRecommendationError] = useState("");
   const [now, setNow] = useState(new Date());
   const [isOnline, setIsOnline] = useState(
@@ -34,6 +54,15 @@ export default function BruRecommendationBoard() {
   useEffect(() => {
     listRef.current = recommendations;
   }, [recommendations]);
+  // Mirror activeIndex in a ref so the rotation interval can check "was
+  // that the last item?" without re-subscribing on every tick.
+  const activeIndexRef = useRef(0);
+  useEffect(() => {
+    activeIndexRef.current = activeIndex;
+  }, [activeIndex]);
+  // How many full passes the image carousel has completed since UI 1 came
+  // on screen — the view hands over to UI 2 after RECOMMENDATION_PASSES.
+  const passCountRef = useRef(0);
 
   // Clock tick
   useEffect(() => {
@@ -83,6 +112,7 @@ export default function BruRecommendationBoard() {
         setActiveIndex(0);
         setDisplayedIndex(0);
         setIsExiting(false);
+        passCountRef.current = 0; // fresh list → restart the pass counter
         setRecommendationError(list.length ? "" : "No recommendations");
       } catch (error) {
         console.error("Recommendation fetch failed:", error);
@@ -113,20 +143,66 @@ export default function BruRecommendationBoard() {
     };
   }, []);
 
-  // Rotate through items every ROTATION_INTERVAL_MS, looping back to start
+  // Rotate through items every ROTATION_INTERVAL_MS. The UI 1 → UI 2
+  // switch is NOT on a fixed timer: the board counts FULL carousel passes
+  // (every image had its complete 17s + slide turn) and hands over to the
+  // reviews view only after RECOMMENDATION_PASSES complete passes — so
+  // the UI never changes suddenly mid-image. With no reviews available it
+  // simply keeps looping.
   useEffect(() => {
-    if (recommendations.length <= 1) return;
+    if (view !== "recommendation") return;
+    if (!recommendations.length) return;
 
     const interval = setInterval(() => {
-      setActiveIndex((prev) => {
-        const list = listRef.current;
-        if (!list.length) return 0;
-        return (prev + 1) % list.length;
-      });
+      const list = listRef.current;
+      if (!list.length) return;
+
+      const prev = activeIndexRef.current;
+      const carouselFinished = prev >= list.length - 1;
+
+      if (carouselFinished) {
+        passCountRef.current += 1;
+
+        if (passCountRef.current >= RECOMMENDATION_PASSES && hasReviews) {
+          // 3 full passes done → show UI 2, and reset the carousel so it
+          // starts fresh from the first item when UI 1 comes back.
+          passCountRef.current = 0;
+          setView("reviews");
+          setActiveIndex(0);
+          setDisplayedIndex(0);
+          setIsExiting(false);
+          return;
+        }
+
+        // Wrap around and start the next pass.
+        setActiveIndex(0);
+        return;
+      }
+
+      setActiveIndex(prev + 1);
     }, ROTATION_INTERVAL_MS);
 
     return () => clearInterval(interval);
-  }, [recommendations.length]);
+  }, [recommendations.length, view, hasReviews]);
+
+  // UI 2 → UI 1: the reviews carousel gets exactly one full cycle (every
+  // review takes a turn at the top: count × REVIEW_STEP_MS), then the
+  // board returns to the recommendation view. The reverse handoff is
+  // event-driven by the image carousel finishing (see effect above).
+  useEffect(() => {
+    if (view !== "reviews") return;
+
+    if (!hasReviews) {
+      setView("recommendation");
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      setView("recommendation");
+    }, Math.max(reviewsCount, 1) * REVIEW_STEP_MS);
+
+    return () => clearTimeout(timer);
+  }, [view, hasReviews, reviewsCount]);
 
   // Staged transition between items so the slide-in animation is actually
   // visible: when activeIndex changes, run a slide-out on the current item
@@ -182,11 +258,21 @@ export default function BruRecommendationBoard() {
         <div className="col-span-3 w-[239px] flex h-full flex-col overflow-hidden rounded-lg p-6 backdrop-blur-md max-[1750px]:px-4 py-2 bg-black/20">
           <div className="border-b border-white/50 pb-2">
             <h1 className="text-xl font-bold tracking-wide">
-              How you Bru-ing?
+              {view === "reviews" ? "The Bru Experience" : "How you Bru-ing?"}
             </h1>
           </div>
           <div className="mt-4 flex flex-1 flex-col overflow-hidden max-[1750px]:mt-3">
-            {recommendationError && !current ? (
+            {/* UI 2 — Google reviews. Stays mounted (so reviews keep
+                refreshing in the background) but only renders while the
+                board is on the reviews view. */}
+            <GoogleReviews
+              active={view === "reviews"}
+              stepMs={REVIEW_STEP_MS}
+              onReviewsCount={setReviewsCount}
+            />
+
+            {view !== "recommendation" ? null : recommendationError &&
+              !current ? (
               <div className="flex h-full items-center justify-center rounded-lg border border-red-500/20 bg-red-500/10 px-4 py-4 text-center text-red-300">
                 {recommendationError}
               </div>
@@ -201,12 +287,7 @@ export default function BruRecommendationBoard() {
                   isExiting ? " exiting" : ""
                 }`}
               >
-                {/* Recommendation text shown ABOVE the image — comic-book speech bubble.
-                    Text comes from the backend (AI-generated, served from cache).
-                    Each layer is an inline SVG. The path uses quadratic curves
-                    (Q commands) at every polygon vertex to round each corner
-                    — fill only, no stroke. The angled top edge is preserved
-                    exactly between curves. */}
+                {/* RECOMMENDATION TEXT speech bubble */}
                 {current.recommendationText ? (
                   <div className="speech-bubble speech-bubble-enter mx-1">
                     <div className="speech-bubble-back">

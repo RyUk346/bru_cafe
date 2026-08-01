@@ -24,6 +24,12 @@ const QUOTE_SCRIPT_URL = process.env.QUOTE_SCRIPT_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const QUOTE_SHEET_ID = process.env.QUOTE_SHEET_ID;
 const BRU_FOOD_SHEET_ID = process.env.BRU_FOOD_SHEET_ID;
+const SERPAPI_API_KEY = process.env.SERPAPI_API_KEY || "";
+// Google Maps "data_id" for the reviews widget (the 0x...:0x... hex that
+// identifies the place). Defaults to Bru Coffee & Gelato Oadby; override via
+// GOOGLE_PLACE_ID in .env.
+const GOOGLE_PLACE_ID =
+  process.env.GOOGLE_PLACE_ID || "0x487765125658a20b:0x6d1b077817c1ddd3";
 
 const SCREEN_LOGIN_TOKEN = process.env.SCREEN_LOGIN_TOKEN;
 const AUTH_COOKIE_SECRET = process.env.AUTH_COOKIE_SECRET;
@@ -1508,6 +1514,283 @@ app.get("/api/weather", async (req, res) => {
     if (widgetWeatherCache) {
       return res.json(widgetWeatherCache.data);
     }
+    return res.status(502).json({ error: error.message });
+  }
+});
+
+// API: Google reviews (proxy for the screen's GoogleReviews widget)
+//
+// Reads PUBLIC Google reviews via SerpApi's Google Maps Reviews engine (no
+// Google Business Profile login required) and returns the latest 5-star
+// reviews. Runs server-side so the SerpApi key stays secret and the
+// locked-down screen browser only ever talks to its own origin.
+//
+// New reviews always land on PAGE 1 (newest-first), so each refresh only needs
+// page 1 — we merge any new 5-star-with-text reviews into the kept list of 6.
+// We page deeper ONLY to seed the list to 6 the first time (many recent Google
+// reviews are star-only, so 6 with text can span several pages). After that
+// it's one page per refresh.
+//
+// Free-tier budget (SerpApi free = 250 searches/month, no card):
+//   • Auto refresh every 6h = 4 pulls/day × 1 page ≈ 120 searches/month.
+//   • The frontend's hourly polling is served from the in-memory cache below,
+//     so it never hits SerpApi.
+//   • Refresh is 6h apart — beyond SerpApi's own ~1h cache window — so each
+//     pull picks up newly-posted reviews automatically, no no_cache needed.
+//   • A one-off deeper seed (≤4 pages) runs on first request / after a restart.
+const GOOGLE_REVIEWS_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const GOOGLE_REVIEWS_MAX = 6; // 5-star reviews kept and shown
+const GOOGLE_REVIEWS_SEED_PAGES = 4; // max pages when first seeding the list
+let googleReviewsCache = null; // { data: { reviews }, timestamp }
+
+async function fetchSerpReviewPage(pageToken = null, forceFresh = false) {
+  const url =
+    "https://serpapi.com/search.json?engine=google_maps_reviews" +
+    `&data_id=${encodeURIComponent(GOOGLE_PLACE_ID)}` +
+    "&sort_by=newestFirst&hl=en" +
+    `&api_key=${encodeURIComponent(SERPAPI_API_KEY)}` +
+    // Auto pulls are 6h apart (beyond SerpApi's cache) so they get fresh data
+    // without no_cache. Only the manual endpoint forces a live scrape.
+    (forceFresh ? "&no_cache=true" : "") +
+    (pageToken ? `&next_page_token=${encodeURIComponent(pageToken)}` : "");
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`SerpApi HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.error) throw new Error(`SerpApi: ${json.error}`);
+  return json;
+}
+
+// Keep only 5-star reviews that have written text (skip star-only ratings).
+function extractFiveStarWithText(json) {
+  const out = [];
+  for (const r of json.reviews || []) {
+    const rating = Number(r.rating) || 0;
+    const text = (r.snippet || "").trim();
+    if (rating !== 5 || !text) continue;
+    out.push({
+      id: r.review_id || r.link || null,
+      name: r.user?.name || "Google user",
+      avatarUrl: r.user?.thumbnail || "",
+      text,
+      rating,
+      timestamp: r.iso_date ? Date.parse(r.iso_date) : 0,
+    });
+  }
+  return out;
+}
+
+// ----------------- Review moderation (3-layer, same as quotes) -----------
+//
+// A 5-star RATING doesn't guarantee safe TEXT — people post negative
+// remarks, policy complaints, slang, profanity, or demotivational content
+// under 5 stars. Every review passes the SAME three layers the quote
+// submission flow uses before it can reach the public monitor:
+//   Layer 1 — deterministic banned-word/leetspeak filter (isMessageSafe)
+//   Layer 2 — OpenAI moderation endpoint (isAiMessageSafe)
+//   Layer 3 — gpt-4o-mini judge with café display policy (moderateReview)
+//
+// Verdicts are cached per review id, so each review costs at most ONE
+// moderation pass ever (reviews are immutable once posted). "unknown"
+// verdicts (API down) fail CLOSED — the review is hidden — but are NOT
+// cached, so the next 6h refresh retries automatically.
+
+const reviewModerationCache = new Map(); // review key -> boolean (safe)
+
+const REVIEW_MODERATION_PROMPT = `You are a strict content moderator for a public café display screen at Bru Oadby, a UK café. You are given the text of a Google review that will be shown on a large in-store monitor visible to all customers, including children.
+
+Even though the review carries a 5-star rating, the TEXT itself may still be unsuitable for public display.
+
+Approve ONLY if the review is a positive, family-friendly customer review appropriate for a public screen.
+
+Reject if the review contains ANY of the following:
+- negative or backhanded remarks about the café, its products, staff, prices, or service (e.g. "great coffee but the staff were rude", "5 stars but overpriced")
+- complaints or comments against business policies
+- profanity, slang, crude or vulgar language, including disguised/leetspeak spellings
+- insults, personal attacks, or mockery of any person or group
+- demotivational, depressing, or unpleasant content
+- political, religious, adult, or otherwise sensitive content
+- personal information (phone numbers, emails, addresses)
+- spam, advertising, or promotion of other businesses
+
+Respond in JSON ONLY:
+{"status": "approved" OR "rejected", "reason": "<short reason>"}`;
+
+// Layer 3 — LLM judge. Returns { status: "approved" | "rejected" | "unknown" }.
+async function moderateReview(text = "") {
+  if (!openai) {
+    console.warn("OPENAI_API_KEY missing. Review held from display.");
+    return { status: "unknown" };
+  }
+
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: REVIEW_MODERATION_PROMPT },
+        { role: "user", content: text },
+      ],
+    });
+
+    const raw = response.choices[0]?.message?.content?.trim() || "";
+    const parsed = JSON.parse(raw);
+    return parsed.status === "approved" || parsed.status === "rejected"
+      ? parsed
+      : { status: "unknown" };
+  } catch (error) {
+    console.error("Review moderation LLM failed:", error?.message || error);
+    return { status: "unknown" };
+  }
+}
+
+// Full 3-layer check for one review. Fail-closed: only a review that
+// explicitly clears ALL THREE layers is shown on the monitor.
+async function isReviewSafeToShow(review) {
+  const text = String(review?.text || "").trim();
+  const name = String(review?.name || "").trim();
+  if (!text) return false;
+
+  const key = review.id || `${name}|${review.timestamp}`;
+  if (reviewModerationCache.has(key)) return reviewModerationCache.get(key);
+
+  // Layer 1 — deterministic banned-word/leetspeak filter (free, instant)
+  if (!isMessageSafe(text) || !isMessageSafe(name)) {
+    console.log(`[reviews] L1 word-filter rejected review by "${name}"`);
+    reviewModerationCache.set(key, false);
+    return false;
+  }
+
+  // Layer 2 — OpenAI moderation endpoint
+  const aiSafe = await isAiMessageSafe(text);
+  if (aiSafe === false) {
+    console.log(`[reviews] L2 AI moderation rejected review by "${name}"`);
+    reviewModerationCache.set(key, false);
+    return false;
+  }
+
+  // Layer 3 — LLM judge against the café display policy
+  const verdict = await moderateReview(text);
+
+  if (aiSafe === "unknown" || verdict.status === "unknown") {
+    // Moderation unavailable → hide for now, retry on the next refresh.
+    console.warn(`[reviews] moderation unavailable — holding review "${key}"`);
+    return false;
+  }
+
+  const safe = verdict.status === "approved";
+  if (!safe) {
+    console.log(
+      `[reviews] L3 judge rejected review by "${name}" — ${verdict.reason || "no reason"}`,
+    );
+  }
+  reviewModerationCache.set(key, safe);
+  return safe;
+}
+
+// Moderate a batch, preserving order. Runs sequentially to stay gentle on
+// rate limits — worst case is ~8 new reviews per 6h refresh.
+async function filterReviewsForDisplay(reviews) {
+  const safe = [];
+  for (const review of reviews) {
+    if (await isReviewSafeToShow(review)) safe.push(review);
+  }
+  return safe;
+}
+
+// Merge incoming into existing, de-dupe by id, keep the newest MAX.
+function mergeReviews(existing, incoming) {
+  const seen = new Map();
+  for (const r of [...incoming, ...existing]) {
+    const key = r.id || `${r.name}|${r.timestamp}`;
+    if (!seen.has(key)) seen.set(key, r);
+  }
+  return [...seen.values()]
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, GOOGLE_REVIEWS_MAX);
+}
+
+// Refresh the kept list: always read page 1 (catches new reviews), then page
+// deeper only while we still don't have MAX (first-time seed).
+async function refreshGoogleReviews(forceFresh = false) {
+  const current = googleReviewsCache?.data?.reviews || [];
+
+  // Every incoming review is moderated (3-layer) BEFORE the merge, so a
+  // rejected review never occupies one of the 6 display slots and the
+  // seed-paging below keeps digging until it finds 6 SAFE reviews.
+  // `current` (already-cached reviews) passed moderation previously.
+  let json = await fetchSerpReviewPage(null, forceFresh); // page 1 (newest)
+  let merged = mergeReviews(
+    current,
+    await filterReviewsForDisplay(extractFiveStarWithText(json)),
+  );
+
+  let pageToken = json.serpapi_pagination?.next_page_token || null;
+  let page = 1;
+  while (
+    merged.length < GOOGLE_REVIEWS_MAX &&
+    pageToken &&
+    page < GOOGLE_REVIEWS_SEED_PAGES
+  ) {
+    json = await fetchSerpReviewPage(pageToken, forceFresh);
+    merged = mergeReviews(
+      merged,
+      await filterReviewsForDisplay(extractFiveStarWithText(json)),
+    );
+    pageToken = json.serpapi_pagination?.next_page_token || null;
+    page += 1;
+  }
+
+  googleReviewsCache = { data: { reviews: merged }, timestamp: Date.now() };
+  return merged;
+}
+
+app.get("/api/google-reviews", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  // No key configured yet — return an empty list so the widget just hides.
+  if (!SERPAPI_API_KEY) {
+    return res.json({ reviews: [] });
+  }
+
+  try {
+    if (
+      googleReviewsCache &&
+      Date.now() - googleReviewsCache.timestamp < GOOGLE_REVIEWS_TTL_MS
+    ) {
+      return res.json(googleReviewsCache.data);
+    }
+
+    const reviews = await refreshGoogleReviews();
+    return res.json({ reviews });
+  } catch (error) {
+    console.error("api/google-reviews error:", error.message);
+    // Serve stale cache rather than breaking the widget on a transient blip.
+    if (googleReviewsCache) {
+      return res.json(googleReviewsCache.data);
+    }
+    return res.status(502).json({ reviews: [], error: error.message });
+  }
+});
+
+// API: OPTIONAL manual refresh. With the 6h auto-refresh above, new reviews
+// appear on their own within 6h — this endpoint is just a "show it right now"
+// shortcut (e.g. straight after posting a review). It forces a fresh live
+// scrape and merges any new reviews into the kept list. Open the URL in a
+// browser; it reports how many 5-star reviews are currently shown.
+app.get("/api/refresh-google-reviews", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  if (!SERPAPI_API_KEY) {
+    return res.status(400).json({ error: "SERPAPI_API_KEY is not set" });
+  }
+
+  try {
+    const reviews = await refreshGoogleReviews(true); // force fresh scrape now
+    return res.json({ success: true, count: reviews.length, reviews });
+  } catch (error) {
+    console.error("api/refresh-google-reviews error:", error.message);
     return res.status(502).json({ error: error.message });
   }
 });

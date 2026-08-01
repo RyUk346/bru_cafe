@@ -1,0 +1,13 @@
+# Normalize line endings: store LF in the repo, let editors use native EOLs.
+# This stops whole-file "phantom diffs" after cloning on Windows (CRLF).
+* text=auto
+
+# Binary assets — never touch line endings
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
