@@ -162,3 +162,31 @@
 .speech-bubble-enter {
   animation: slideInFromLeft 700ms cubic-bezier(0.25, 0.9, 0.3, 1) 2s both;
 }
+
+/* ── UI 2: Google reviews panel ──────────────────────────────────────────
+   The board loops between UI 1 (recommendation) and UI 2 (reviews). */
+
+/* Whole-view entrance when the board loops from UI 1 → UI 2: the panel
+   rises from below and fades in for a smooth hand-off. */
+@keyframes viewFadeUp {
+  0% {
+    transform: translateY(32px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.view-enter {
+  animation: viewFadeUp 700ms cubic-bezier(0.25, 0.9, 0.3, 1) both;
+}
+
+/* Vertical review carousel track. The step animation itself is driven from
+   React via an inline transform + transition (see GoogleReviews.jsx):
+   every STEP_INTERVAL_MS the track eases up by exactly one card, and the
+   duplicated list lets the wrap-around snap back invisibly. */
+.reviews-track {
+  will-change: transform;
+}
