@@ -1,0 +1,192 @@
+@import "tailwindcss";
+
+/* In your index.css */
+.animate-slide-text {
+  display: inline-block;
+  padding-left: 0%;
+  animation: slide 8s linear infinite;
+}
+/* Rotation transition keyframes.
+   Image and bubble each have their own staggered entrance animation
+   (see .image-enter and .speech-bubble-enter below); the wrapper only
+   handles the shared slide-out when the item is leaving. */
+@keyframes slideOut {
+  0% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(24px);
+    opacity: 0;
+  }
+}
+
+/* Default wrapper: no entrance animation — children animate themselves */
+.animated-image {
+  /* intentionally empty */
+}
+
+/* While exiting, the wrapper (and everything in it) slides out together */
+.animated-image.exiting {
+  animation: slideOut 2500ms ease-in both;
+}
+
+/* Image: drops in from above first */
+@keyframes slideInFromTop {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.image-enter {
+  animation: slideInFromTop 800ms cubic-bezier(0.25, 0.9, 0.3, 1) both;
+}
+@keyframes slide {
+  0% {
+    transform: translateX(0);
+  }
+  10% {
+    transform: translateX(0);
+  } /* Wait at the start */
+  90% {
+    transform: translateX(-100%);
+  } /* Slide to the end */
+  100% {
+    transform: translateX(0);
+  } /* Reset */
+}
+
+/* Layered speech bubble:
+   - Front layer: warm color, leans LEFT (skewX -5deg)
+   - Back layer: warm darker color, leans RIGHT (skewX +5deg), offset down-right
+   - Tail: triangle attached to the back layer pointing down-left
+   - Each layer's shape is rendered via inline SVG so the angled corners can
+     be properly rounded (stroke-linejoin: round + non-scaling-stroke). */
+.speech-bubble {
+  position: relative;
+  /* Leave room above for the front layer's upward shift (bottom: 10px)
+     so the parent's overflow-hidden doesn't clip the top of the front. */
+  margin-top: 12px;
+  /* No background — the SVG layers below paint everything */
+  /* filter: drop-shadow(0 14px 24px rgba(0, 0, 0, 0.45)); */
+}
+
+/* BACK BOX: Left side higher, Right side lower.
+   bottom: 0 keeps the back's bottom edge aligned with the front's.
+   Container is NOT skewed so the tail keeps its natural orientation —
+   only the SVG shape inside is skewed (see .speech-bubble-back .speech-bubble-shape). */
+.speech-bubble-back {
+  position: absolute;
+  width: 190px;
+  top: 0;
+  left: 6px;
+  right: -6px;
+  bottom: 0;
+  z-index: 1;
+}
+
+.speech-bubble-shape {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* Allow the rounded stroke to extend slightly beyond the SVG box */
+  overflow: visible;
+  display: block;
+  left: px;
+  pointer-events: none;
+}
+
+/* Skew applied to the SVG shape only — keeps the tail (sibling) unskewed. */
+.speech-bubble-back > .speech-bubble-shape {
+  transform: skewX(5deg);
+}
+
+/* Tail: Now safe because it's outside the clip-pathed pseudo-element */
+.speech-bubble-tail {
+  position: absolute;
+  bottom: -22px;
+  left: 28px;
+  width: 0;
+  height: 0;
+  border-top: 25px solid #cfac60;
+  border-right: 22px solid transparent;
+}
+
+/* FRONT BOX: Left side lower, Right side higher.
+   Rendered as an inline SVG (see .speech-bubble-shape) for proper rounded
+   corners while preserving the angled top edge. */
+.speech-bubble-front {
+  position: relative;
+  padding: 24px 14px 12px 14px; /* Extra top padding for the slope */
+  left: -10px;
+  width: 195px;
+  bottom: 10px;
+  border-radius: 16px;
+  z-index: 2;
+  color: #2a3a3a;
+  text-align: center;
+  transform: skewX(5deg);
+}
+
+/* Text stays perfectly upright (counter-skew). Only the <p>, not the SVG. */
+.speech-bubble-front > p {
+  position: relative;
+  z-index: 3;
+  left: 8px;
+  text-align: center;
+  display: block;
+  transform: skewX(-5deg);
+}
+
+/* Bubble entrance: slides in from the left, but waits 2 seconds first
+   so the image lands in place before the bubble appears.
+   The text stays perfectly still once the slide-in completes
+   (no continuous bobbing — sub-pixel movement looked janky on the cafe screen). */
+@keyframes slideInFromLeft {
+  0% {
+    transform: translateX(-150%);
+    opacity: 0;
+  }
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.speech-bubble-enter {
+  animation: slideInFromLeft 700ms cubic-bezier(0.25, 0.9, 0.3, 1) 2s both;
+}
+
+/* ── UI 2: Google reviews panel ──────────────────────────────────────────
+   The board loops between UI 1 (recommendation) and UI 2 (reviews). */
+
+/* Whole-view entrance when the board loops from UI 1 → UI 2: the panel
+   rises from below and fades in for a smooth hand-off. */
+@keyframes viewFadeUp {
+  0% {
+    transform: translateY(32px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.view-enter {
+  animation: viewFadeUp 700ms cubic-bezier(0.25, 0.9, 0.3, 1) both;
+}
+
+/* Vertical review carousel track. The step animation itself is driven from
+   React via an inline transform + transition (see GoogleReviews.jsx):
+   every STEP_INTERVAL_MS the track eases up by exactly one card, and the
+   duplicated list lets the wrap-around snap back invisibly. */
+.reviews-track {
+  will-change: transform;
+}
