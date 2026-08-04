@@ -17,9 +17,9 @@ import { timeAgo } from "../utils/date";
    Google profile picture when available) as a VERTICAL CAROUSEL: several
    cards are visible at once, and every
    STEP_INTERVAL_MS the column scrolls up by exactly one card with a smooth
-   eased transition. The list is rendered twice so that after stepping past
-   the last review the track snaps (invisibly, with the transition disabled)
-   back to the identical first card — an infinite loop with no jump.
+   eased transition. Repeat is OFF — the track plays through the list once
+   and then rests on the last review (it does not wrap back to the top).
+   It restarts from the top each time UI 2 comes back on screen.
 
    Props:
    - active       → whether UI 2 is currently on screen. The component stays
@@ -98,16 +98,18 @@ export default function GoogleReviews({
     }
   }, [active]);
 
-  // Advance the carousel one card at a time while on screen
+  // Advance the carousel one card at a time while on screen.
+  // Repeat is OFF: it stops once the last review is at the top.
   useEffect(() => {
     if (!active || reviews.length <= 1) return;
+    if (step >= reviews.length - 1) return; // reached the end — stop stepping
 
-    const interval = setInterval(() => {
-      setStep((prev) => prev + 1);
+    const timer = setTimeout(() => {
+      setStep((prev) => Math.min(prev + 1, reviews.length - 1));
     }, stepMs);
 
-    return () => clearInterval(interval);
-  }, [active, reviews.length, stepMs]);
+    return () => clearTimeout(timer);
+  }, [active, step, reviews.length, stepMs]);
 
   // Measure how far the track must slide so card[step] sits at the top.
   // Measured from the DOM (offsetTop) so cards can have natural heights.
@@ -118,19 +120,7 @@ export default function GoogleReviews({
     setOffset(child ? child.offsetTop : 0);
   }, [step, reviews, active]);
 
-  // Seamless infinite loop: after animating onto the duplicate copy's
-  // first card, snap back to the real first card with the transition off
-  // (identical pixels, so the reset is invisible).
-  useEffect(() => {
-    if (!reviews.length || step < reviews.length) return;
-
-    const timer = setTimeout(() => {
-      setAnimate(false);
-      setStep(0);
-    }, STEP_TRANSITION_MS + 50);
-
-    return () => clearTimeout(timer);
-  }, [step, reviews.length]);
+  // (Repeat is OFF — no wrap-around snap back to the first card.)
 
   // Re-enable the transition one frame after any snap-reset
   useEffect(() => {
@@ -145,7 +135,7 @@ export default function GoogleReviews({
   // the component itself stays mounted so the refresh interval survives.
   if (!active || !reviews.length) return null;
 
-  const activeDot = step % reviews.length;
+  const activeDot = Math.min(step, reviews.length - 1);
 
   const renderCard = (review, key) => {
     const name = review.name || "Google user";
@@ -205,8 +195,8 @@ export default function GoogleReviews({
       </div>  */}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {/* Carousel track: the flat card list is rendered twice so the
-            wrap-around step lands on identical pixels before the snap. */}
+        {/* Carousel track: the card list is rendered ONCE — repeat is off,
+            so there is no wrap-around and no duplicate copy is needed. */}
         <div
           ref={trackRef}
           className="reviews-track"
@@ -219,15 +209,11 @@ export default function GoogleReviews({
               : "none",
           }}
         >
-          {[0, 1].map((copyIdx) =>
-            reviews.map((review, idx) =>
-              renderCard(review, `${copyIdx}-${review.id ?? idx}`),
-            ),
-          )}
+          {reviews.map((review, idx) => renderCard(review, review.id ?? idx))}
         </div>
 
         {/* Soft fade at the bottom edge so the next card glides in */}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/30 to-transparent" />
+        {/* <div className="pointer-events-none absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/30 to-transparent" /> */}
       </div>
 
       {/* Carousel dots — which review is currently at the top */}
